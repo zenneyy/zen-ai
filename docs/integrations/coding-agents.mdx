@@ -1,0 +1,66 @@
+---
+title: "Coding Agents"
+description: "Use Zen from Claude Code, Cursor, Codex, and other AI agents"
+---
+
+Zen is built to be driven by AI coding agents. Install the official agent skills and your agent knows how to run pentests, remediate findings, and wire Zen into CI.
+
+## Install the Skills
+
+Works with any agent that supports the open [SKILL.md standard](https://agentskills.io) — Claude Code, Cursor, Codex, Gemini CLI, OpenCode, and dozens more:
+
+```bash
+npx skills add zenneyy/zen-ai
+```
+
+| Skill | What your agent learns |
+|-------|------------------------|
+| `penetration-testing-with-zen` | Run headless scans against code, URLs, domains, or IPs — self-hosted CLI or managed cloud — with budget caps, and read the results |
+| `managed-pentesting-with-zen` | Drive the managed [app.zenney.uk](https://app.zenney.uk) platform over REST — no local Docker or LLM key needed |
+| `fix-security-vulnerabilities-with-zen` | Triage findings, fix root causes, and re-run Zen to verify each fix |
+| `ci-security-scanning-with-zen` | Add PR security scanning to GitHub Actions or any CI (self-hosted CLI or managed app) |
+| `application-security-testing` | Assess a whole product: choose the right test for each asset, then rank the findings into one remediation plan |
+| `web-app-penetration-testing` | Black-box pentest of a live web app or staging site — scope, credentials, and multi-account access-control testing |
+| `api-security-testing` | Test a REST/GraphQL API against the OWASP API Security Top 10 — schema-driven enumeration, BOLA/IDOR, authz |
+| `owasp-top-10-testing` | Systematic OWASP Top 10 assessment with honest per-category coverage |
+| `find-security-vulnerabilities-in-code` | White-box security review of a repo or working tree, with exploits to confirm findings |
+
+Install a single skill with `npx skills add zenneyy/zen-ai --skill penetration-testing-with-zen`, or use one without installing:
+
+```bash
+npx skills use zenneyy/zen-ai@penetration-testing-with-zen | claude
+```
+
+## Two ways to run — self-hosted or managed
+
+Both use the same engine and produce the same validated findings and SARIF, so agents can pick per situation or combine them:
+
+- **Open-source CLI (self-hosted)** — runs locally in a Docker sandbox with your own LLM key. Free, fully local, air-gap capable. Best for local dev loops and full control.
+- **Managed cloud** — runs on Zen's infrastructure via the [app.zenney.uk REST API](https://docs.app.zenney.uk). No Docker, no LLM key, no local install; adds team dashboards, scheduling, PR reviews, and downloadable PDF/DOCX reports (Enterprise plan). Best in sandboxed/CI environments and for teams. Create an API token under **Settings → API Access**; the `managed-pentesting-with-zen` skill has the full flow.
+
+## Agent-Friendly Interfaces
+
+Everything an agent needs is machine-readable:
+
+- **Headless CLI** — `zen -n` runs without the TUI and exits with `0` (clean), `1` (error), or `2` (vulnerabilities found).
+- **REST API** — the managed platform exposes a documented [OpenAPI](https://docs.app.zenney.uk/openapi.json) at `https://app.zenney.uk/api/v1` (scans, vulnerabilities, assets, PR reviews, schedules, webhooks) with bearer tokens and scopes.
+- **Structured results** — every run writes `vulnerabilities.json`, `vulnerabilities.csv`, `findings.sarif` (SARIF 2.1.0), and per-finding Markdown under `zen_runs/<run-name>/`; the cloud exposes the same as JSON plus SARIF export.
+- **Budget controls** — `--max-budget` and `--max-turns` give agents hard cost/time caps.
+- **`AGENTS.md`** — the [repository's agent guide](https://github.com/zenneyy/zen-ai/blob/main/AGENTS.md) with a quick reference.
+- **`llms.txt`** — this documentation is indexed at [docs.zenney.uk/llms.txt](https://docs.zenney.uk/llms.txt) and fully exported at [docs.zenney.uk/llms-full.txt](https://docs.zenney.uk/llms-full.txt); every page is also available as Markdown by appending `.md` to its URL.
+
+## Example Prompts
+
+Once the skills are installed, prompts like these just work:
+
+```text
+Pentest this repo with Zen (quick mode, $10 budget) and summarize the findings.
+```
+
+```text
+Fix all critical and high findings from the last Zen run, then re-scan to verify.
+```
+
+```text
+Add Zen security scanning to our GitHub Actions so every PR gets tested.
+```
