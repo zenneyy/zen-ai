@@ -306,8 +306,15 @@ export ZEN_REASONING_EFFORT="high"           # thinking effort (default: high, q
 > [!NOTE]
 > Configuration is persisted to `~/.zen/cli-config.json` on write, so these values survive between runs. Claude credentials are not written there — the bridge reads them from the Claude Code session at runtime.
 
+#### Sign in with a ChatGPT subscription
 
+Instead of a metered API key, you can run Zen on your ChatGPT Plus/Pro subscription:
 
+```bash
+zen auth login chatgpt             # sign in with your ChatGPT account
+export ZEN_LLM="chatgpt/gpt-5.4"   # chatgpt/<model> runs on the subscription
+zen auth status                    # show the active sign-in, or logout to forget it
+```
 #### Claude via the bridge
 
 Zen has no Claude login of its own. Install Claude Code, sign in there once, then start the bridge — it picks up that session automatically and serves it to Zen for the duration of the run.
@@ -382,9 +389,15 @@ Questions, defect reports, and design discussion happen on **[Discord](https://d
 
 If Zen earns a place in your toolchain, a ⭐ on GitHub helps others find it.
 
+## License and attribution
+
+Zen is licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution.
+
+Zen is a derivative work of [Strix](https://github.com/usestrix/strix), Copyright 2025 OmniSecure Inc., licensed under Apache-2.0. Files throughout this distribution have been modified from the original Strix sources. Our thanks to the Strix team for the foundation this builds on.
+
 ## Upstream projects
 
-Zen is built on [LiteLLM](https://github.com/BerriAI/litellm), [Caido](https://github.com/caido/caido), [Nuclei](https://github.com/projectdiscovery/nuclei), [Playwright](https://github.com/microsoft/playwright), and [Bubble Tea](https://github.com/charmbracelet/bubbletea). Our thanks to the teams maintaining them.
+Zen and Strix both build on [LiteLLM](https://github.com/BerriAI/litellm), [Caido](https://github.com/caido/caido), [Nuclei](https://github.com/projectdiscovery/nuclei), [Playwright](https://github.com/microsoft/playwright), and [Bubble Tea](https://github.com/charmbracelet/bubbletea). Our thanks to the teams maintaining them.
 
 
 > [!WARNING]
