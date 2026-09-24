@@ -30,6 +30,8 @@ _LLM_ENV_KEYS = [
     "ZEN_FORCE_REQUIRED_TOOL_CHOICE",
     "LLM_TIMEOUT",
     "PERPLEXITY_API_KEY",
+    "EXA_API_KEY",
+    "ZEN_WEB_SEARCH_PROVIDER",
     # RuntimeSettings
     "ZEN_IMAGE",
     "ZEN_RUNTIME_BACKEND",
@@ -77,6 +79,17 @@ def test_read_json_overrides_maps_to_nested_settings(tmp_path: Path) -> None:
     assert loader._read_json_overrides(path) == {
         "llm": {"model": "my-model"},
         "integrations": {"perplexity_api_key": "pk"},
+    }
+
+
+def test_read_json_overrides_maps_exa_and_provider(tmp_path: Path) -> None:
+    path = tmp_path / "cli-config.json"
+    path.write_text(
+        json.dumps({"env": {"EXA_API_KEY": "exa-key", "ZEN_WEB_SEARCH_PROVIDER": "exa"}}),
+        encoding="utf-8",
+    )
+    assert loader._read_json_overrides(path) == {
+        "integrations": {"exa_api_key": "exa-key", "web_search_provider": "exa"},
     }
 
 
@@ -203,9 +216,7 @@ def test_persist_current_writes_env_block(tmp_path: Path, monkeypatch: pytest.Mo
     loader.persist_current()
 
     assert target.exists()
-    assert json.loads(target.read_text(encoding="utf-8")) == {
-        "env": {"ZEN_LLM": "persisted-model"}
-    }
+    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"ZEN_LLM": "persisted-model"}}
 
 
 def test_persist_current_sets_0600_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

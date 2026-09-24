@@ -90,9 +90,7 @@ class ContextSettings(BaseSettings):
     auto_compact: bool = Field(default=True, alias="ZEN_CONTEXT_AUTO_COMPACT")
     compact_buffer_tokens: int = Field(default=20_000, gt=0, alias="ZEN_CONTEXT_BUFFER_TOKENS")
     keep_tokens: int = Field(default=8_000, gt=0, alias="ZEN_CONTEXT_KEEP_TOKENS")
-    fallback_context_tokens: int = Field(
-        default=200_000, gt=0, alias="ZEN_CONTEXT_FALLBACK_TOKENS"
-    )
+    fallback_context_tokens: int = Field(default=200_000, gt=0, alias="ZEN_CONTEXT_FALLBACK_TOKENS")
     summary_max_tokens: int = Field(default=4_096, gt=0, alias="ZEN_CONTEXT_SUMMARY_TOKENS")
     tool_output_max_tokens: int = Field(default=8_000, gt=0, alias="ZEN_TOOL_OUTPUT_MAX_TOKENS")
     tool_output_max_lines: int = Field(default=2_000, gt=0, alias="ZEN_TOOL_OUTPUT_MAX_LINES")
@@ -120,6 +118,10 @@ class TelemetrySettings(BaseSettings):
     enabled: bool = Field(default=True, alias="ZEN_TELEMETRY")
 
 
+WebSearchProvider = Literal["auto", "perplexity", "exa"]
+ExaSearchType = Literal["auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning"]
+
+
 class IntegrationSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
@@ -127,6 +129,25 @@ class IntegrationSettings(BaseSettings):
         default=None,
         alias="PERPLEXITY_API_KEY",
         repr=False,
+    )
+    exa_api_key: str | None = Field(
+        default=None,
+        alias="EXA_API_KEY",
+        repr=False,
+    )
+    web_search_provider: WebSearchProvider = Field(
+        default="auto",
+        alias="ZEN_WEB_SEARCH_PROVIDER",
+    )
+    exa_search_type: ExaSearchType = Field(
+        default="auto",
+        alias="ZEN_EXA_SEARCH_TYPE",
+    )
+    exa_num_results: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        alias="ZEN_EXA_NUM_RESULTS",
     )
     postman_api_key: str | None = Field(
         default=None,
