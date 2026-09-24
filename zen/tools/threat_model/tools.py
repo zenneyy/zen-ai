@@ -370,8 +370,11 @@ def _save_impl(
 
     missing = _missing_sections(body)
     if missing:
-        logger.debug("threat_model rejected — missing: %s | headings found: %s",
-                     missing, [l.strip() for l in body.split("\n") if l.strip().startswith("#")])
+        logger.debug(
+            "threat_model rejected — missing: %s | headings found: %s",
+            missing,
+            [line.strip() for line in body.split("\n") if line.strip().startswith("#")],
+        )
         return {
             "success": False,
             "error": (
