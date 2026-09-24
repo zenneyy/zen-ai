@@ -208,7 +208,7 @@ async def test_mcp_available_flag_set_when_a_connection_attaches(
         config=McpConnectionConfig(
             name="fs",
             url="https://mcp.example.com",
-            auth=BearerAuth(token="run-token"),
+            auth=BearerAuth(token="run-token"),  # noqa: S106
         )
     )
 

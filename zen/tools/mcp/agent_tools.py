@@ -124,7 +124,7 @@ async def describe_mcp(ctx: RunContextWrapper, connection: str) -> str:
 
 
 @function_tool(timeout=120, strict_mode=False)
-async def call_mcp(
+async def call_mcp(  # noqa: PLR0911
     ctx: RunContextWrapper,
     connection: str,
     tool: str,

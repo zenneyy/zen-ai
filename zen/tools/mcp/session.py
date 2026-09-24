@@ -303,7 +303,7 @@ class SupervisedMcpSession:
         (``success: False``) with a "connection unavailable" message when the
         connection is dead.
         """
-        from zen.tools.mcp.client import dispatch_mcp_call
+        from zen.tools.mcp.client import dispatch_mcp_call  # noqa: PLC0415
 
         async def job(server: MCPServer) -> Any:
             return await dispatch_mcp_call(
@@ -316,7 +316,7 @@ class SupervisedMcpSession:
 
         outcome = await self._run_job(job)
         if outcome.dead:
-            from zen.tools.mcp.client import _errored_tool_output
+            from zen.tools.mcp.client import _errored_tool_output  # noqa: PLC0415
 
             return _errored_tool_output(self._unavailable_message())
         return outcome.value
@@ -397,9 +397,7 @@ class SupervisedMcpSession:
                         self._name,
                     )
                     if await self._reconnect():
-                        logger.info(
-                            "MCP connection %r reconnected after an idle death", self._name
-                        )
+                        logger.info("MCP connection %r reconnected after an idle death", self._name)
                         self._healed_without_progress = True
                         continue
                 else:
@@ -441,9 +439,7 @@ class SupervisedMcpSession:
                 self._name,
             )
         except Exception:  # noqa: BLE001 - any call failure is treated as a session death
-            logger.warning(
-                "MCP connection %r failed mid-call; reconnecting once", self._name
-            )
+            logger.warning("MCP connection %r failed mid-call; reconnecting once", self._name)
 
         if not await self._reconnect():
             self._mark_dead()
@@ -495,7 +491,7 @@ class SupervisedMcpSession:
         same task before the error propagates, so a failed connect never orphans
         an MCP subprocess or half-open HTTP session.
         """
-        from zen.tools.mcp.client import _build_server
+        from zen.tools.mcp.client import _build_server  # noqa: PLC0415
 
         if self._config is None:
             raise RuntimeError(f"MCP connection {self._name!r} has no config to connect")

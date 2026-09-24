@@ -793,9 +793,7 @@ async def test_structured_provider_refusal_fails_interactive_agent(
 ) -> None:
     refusal = "This request was blocked under the provider's usage policy."
     stream = _StructuredRefusalStream(refusal)
-    monkeypatch.setattr(
-        "zen.core.execution.Runner.run_streamed", lambda *_args, **_kwargs: stream
-    )
+    monkeypatch.setattr("zen.core.execution.Runner.run_streamed", lambda *_args, **_kwargs: stream)
     coordinator = AgentCoordinator()
     await coordinator.register("root", "zen", parent_id=None)
 
@@ -825,9 +823,7 @@ async def test_structured_provider_refusal_fails_noninteractive_child(
 ) -> None:
     refusal = "This request was blocked under the provider's usage policy."
     stream = _StructuredRefusalStream(refusal)
-    monkeypatch.setattr(
-        "zen.core.execution.Runner.run_streamed", lambda *_args, **_kwargs: stream
-    )
+    monkeypatch.setattr("zen.core.execution.Runner.run_streamed", lambda *_args, **_kwargs: stream)
     coordinator = AgentCoordinator()
     await coordinator.register("root", "zen", parent_id=None)
     await coordinator.register("child", "recon", parent_id="root")

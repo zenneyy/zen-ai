@@ -1,6 +1,6 @@
 [project]
 name = "zen-agent"
-version = "1.2.0"
+version = "1.2.1"
 description = "Open-source offensive security agents for autonomous pentesting"
 readme = "README.md"
 license = "Apache-2.0"
