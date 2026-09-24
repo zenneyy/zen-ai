@@ -1,6 +1,5 @@
 import logging
 import re
-import threading
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
@@ -8,7 +7,6 @@ from typing import TypeGuard
 
 import yaml
 
-from zen.telemetry import posthog, scarf
 from zen.utils.resource_paths import get_zen_resource_path
 
 
@@ -288,16 +286,19 @@ def validate_requested_skills(skill_list: list[str], max_skills: int = 5) -> str
     return None
 
 
+_LOADED_SKILLS: set[str] = set()
+
+
 def _track_skill_loaded(skill_name: str, file_path: Path) -> None:
     builtin = get_zen_resource_path("skills")
     if not file_path.is_relative_to(builtin):
         skill_name = "custom"
+    _LOADED_SKILLS.add(skill_name)
 
-    def _send() -> None:
-        posthog.skill_loaded(skill_name)
-        scarf.skill_loaded(skill_name)
 
-    threading.Thread(target=_send, daemon=True).start()
+def get_loaded_skill_names() -> list[str]:
+    """Distinct skills loaded so far in this process (custom skills collapse to ``"custom"``)."""
+    return sorted(_LOADED_SKILLS)
 
 
 def _candidate_skill_files(skill_name: str) -> list[Path]:
