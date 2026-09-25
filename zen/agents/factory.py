@@ -29,7 +29,13 @@ from zen.tools.agents_graph.tools import (
 from zen.tools.coverage.tools import list_coverage, record_coverage, update_coverage
 from zen.tools.finish.tool import finish_scan
 from zen.tools.load_skill.tool import load_skill
-from zen.tools.mcp import call_mcp, describe_mcp, list_mcps
+from zen.tools.mcp import (
+    call_mcp,
+    describe_mcp,
+    get_mcp_tool_schema,
+    list_mcps,
+    search_mcp_tools,
+)
 from zen.tools.notes.tools import (
     create_note,
     delete_note,
@@ -592,6 +598,8 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     view_sitemap_entry,
     scope_rules,
     list_mcps,
+    search_mcp_tools,
+    get_mcp_tool_schema,
     describe_mcp,
     call_mcp,
     view_agent_graph,
