@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import subprocess
 import threading
 from collections.abc import Callable
@@ -32,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 _global_report_state: Optional["ReportState"] = None
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+
 
 def _zen_version() -> str | None:
     """Best-effort package version for the SARIF tool.driver.version field."""
@@ -39,6 +42,17 @@ def _zen_version() -> str | None:
         return version("zen-agent")
     except PackageNotFoundError:
         return None
+
+
+def _clean_title(title: str) -> str:
+    """Return a single-line finding title.
+
+    A title quotes text from the scanned target, so it can carry newlines, tabs or
+    other control characters. Those break every artifact that renders the title on
+    one line, such as the markdown heading, the CSV cell and the TUI list. Control
+    characters become spaces and runs of whitespace collapse to one space.
+    """
+    return " ".join(_CONTROL_CHARS.sub(" ", title).split())
 
 
 def _number(value: Any) -> int | float:
@@ -222,8 +236,15 @@ class ReportState:
                 )
             self.vulnerability_reports = [r for r in data if isinstance(r, dict)]
             for r in self.vulnerability_reports:
+                title = r.get("title")
+                stale_md = False
+                if isinstance(title, str):
+                    r["title"] = _clean_title(title)
+                    stale_md = r["title"] != title
                 rid = r.get("id")
-                if isinstance(rid, str):
+                # A finding already on disk keeps its markdown, unless cleaning
+                # changed the title: the heading on disk then needs a rewrite.
+                if isinstance(rid, str) and not stale_md:
                     self._saved_vuln_ids.add(rid)
             logger.info(
                 "report state hydrated %d vulnerability report(s)",
@@ -266,7 +287,7 @@ class ReportState:
 
         report: dict[str, Any] = {
             "id": report_id,
-            "title": title.strip(),
+            "title": _clean_title(title),
             "severity": severity.lower().strip(),
             "timestamp": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
         }

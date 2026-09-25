@@ -26,8 +26,31 @@ logger = logging.getLogger(__name__)
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
 _FENCE_RE = re.compile(r"^```([^\n`]*)\r?\n(.*?)\r?\n?```$", re.DOTALL)
 _BACKTICK_RUN = re.compile(r"`+")
+
+
+def csv_safe(value: object) -> str:
+    """Return ``value`` as a CSV cell a spreadsheet will not treat as a formula.
+
+    Excel, LibreOffice and Sheets evaluate a cell whose first character is one of
+    ``= + - @``, tab or carriage return. The :mod:`csv` module quotes CSV syntax
+    but has no notion of formula triggers, so such a value reaches the cell intact
+    and is executed on open (CWE-1236). Vulnerability titles quote text from the
+    scanned target, which is exactly the attacker-influenced input this guards
+    against.
+
+    Prefixing with an apostrophe is the standard mitigation (OWASP): the rest of
+    the cell is kept as literal text instead of being evaluated. Excel shows the
+    apostrophe when it opens a ``.csv`` directly, which is cosmetic — the point is
+    that nothing runs.
+    """
+    text = str(value)
+    if text.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + text
+    return text
 
 
 def safe_fence(content: str) -> str:
@@ -151,11 +174,11 @@ def write_vulnerabilities(
     for report in sorted_reports:
         csv_writer.writerow(
             {
-                "id": report["id"],
-                "title": report["title"],
-                "severity": report["severity"].upper(),
-                "timestamp": report["timestamp"],
-                "file": f"vulnerabilities/{report['id']}.md",
+                "id": csv_safe(report["id"]),
+                "title": csv_safe(report["title"]),
+                "severity": csv_safe(report["severity"].upper()),
+                "timestamp": csv_safe(report["timestamp"]),
+                "file": csv_safe(f"vulnerabilities/{report['id']}.md"),
             },
         )
     atomic_write_text(csv_path, csv_buf.getvalue())
@@ -176,11 +199,17 @@ def write_vulnerabilities(
 
 
 def atomic_write_text(path: Path, payload: str) -> None:
-    """Write *payload* to *path* via a sibling temp file and an atomic rename."""
+    """Write *payload* to *path* via a sibling temp file and an atomic rename.
+
+    ``newline=""`` disables newline translation so *payload* lands byte-for-byte:
+    the CSV index carries its own ``\\r\\n`` terminators, which text mode would turn
+    into ``\\r\\r\\n`` on Windows.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
+        newline="",
         dir=str(path.parent),
         prefix=f".{path.name}.",
         suffix=".tmp",
