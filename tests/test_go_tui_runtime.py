@@ -19,6 +19,7 @@ from zen.config.settings import DEFAULT_MAX_TURNS
 from zen.interface.tui import runtime as go_tui
 from zen.interface.tui import sidecar
 from zen.interface.tui.runtime import GoTuiRuntime
+from zen.report.state import ReportState
 
 
 def args() -> argparse.Namespace:
@@ -1027,3 +1028,29 @@ async def test_prepare_and_start_runs_the_scan_after_preparation(
 
     assert order == ["preflight", "persist", "prepare", "telemetry", "state", "scan"]
     assert runtime.controller.scan_state == "running"
+
+
+def test_sync_fingerprint_tracks_report_revisions(tmp_path: Path) -> None:
+    runtime = GoTuiRuntime(args())
+    runtime.report_state = ReportState(run_name="test-run")
+    runtime.report_state.vulnerability_reports = [{"id": "vuln-0001", "title": "Old title"}]
+    runtime.report_state.get_run_dir = lambda: tmp_path  # type: ignore[method-assign]
+
+    report = runtime.report_state.vulnerability_reports[0]
+    timestamp = "2026-09-09 10:00:00 UTC"
+
+    before = runtime._runtime_sync_fingerprint()
+    report.update(
+        {
+            "title": "New title",
+            "updated_at": timestamp,
+            "update_history": [{"timestamp": timestamp, "fields": ["title"]}],
+        }
+    )
+    first_revision = runtime._runtime_sync_fingerprint()
+    assert first_revision != before
+
+    report["title"] = "Newer title"
+    report["update_history"].append({"timestamp": timestamp, "fields": ["title"]})
+
+    assert runtime._runtime_sync_fingerprint() != first_revision
