@@ -373,7 +373,7 @@ class SupervisedMcpSession:
         is unavailable. A call rejection keeps the connection usable because the
         provider rejected the request, not the session.
         """
-        from zen.tools.mcp.client import dispatch_mcp_call  # noqa: PLC0415
+        from zen.tools.mcp.client import dispatch_mcp_call
 
         async def job(server: MCPServer) -> Any:
             return await dispatch_mcp_call(
@@ -386,11 +386,11 @@ class SupervisedMcpSession:
 
         outcome = await self._run_job(job, phase="call")
         if outcome.call_failure is not None:
-            from zen.tools.mcp.client import _errored_tool_output  # noqa: PLC0415
+            from zen.tools.mcp.client import _errored_tool_output
 
             return _errored_tool_output(self._call_rejected_message(outcome.call_failure))
         if outcome.dead:
-            from zen.tools.mcp.client import _errored_tool_output  # noqa: PLC0415
+            from zen.tools.mcp.client import _errored_tool_output
 
             return _errored_tool_output(self._unavailable_message())
         return outcome.value
@@ -695,7 +695,7 @@ class SupervisedMcpSession:
         same task before the error propagates, so a failed connect never orphans
         an MCP subprocess or half-open HTTP session.
         """
-        from zen.tools.mcp.client import _build_server  # noqa: PLC0415
+        from zen.tools.mcp.client import _build_server
 
         if self._config is None:
             raise RuntimeError(f"MCP connection {self._name!r} has no config to connect")
