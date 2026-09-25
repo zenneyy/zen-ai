@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_POSTHOG_PUBLIC_API_KEY = "phc_7rO3XRuNT5sgSKAl6HDIrWdSGh1COzxw0vxVIAR6vVZ"
+_POSTHOG_PUBLIC_API_KEY = ""
 _POSTHOG_HOST = "https://us.i.posthog.com"
 
 
@@ -33,6 +33,9 @@ def _is_enabled() -> bool:
 def _send(event: str, properties: dict[str, Any]) -> bool:
     if not _is_enabled():
         logger.debug("posthog disabled; skipping event %s", event)
+        return False
+    if not _POSTHOG_PUBLIC_API_KEY:
+        logger.debug("posthog not configured; skipping event %s", event)
         return False
     try:
         payload = {

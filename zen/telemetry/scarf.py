@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SCARF_ENDPOINT = "https://zen.gateway.scarf.sh"
+_SCARF_ENDPOINT = ""
 
 
 def _is_enabled() -> bool:
@@ -35,6 +35,9 @@ def _is_enabled() -> bool:
 def _send(event: str, properties: dict[str, Any]) -> bool:
     if not _is_enabled():
         logger.debug("scarf disabled; skipping event %s", event)
+        return False
+    if not _SCARF_ENDPOINT:
+        logger.debug("scarf not configured; skipping event %s", event)
         return False
     try:
         props = dict(properties)

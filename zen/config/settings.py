@@ -121,7 +121,7 @@ class RuntimeSettings(BaseSettings):
 class TelemetrySettings(BaseSettings):
     model_config = _BASE_CONFIG
 
-    enabled: bool = Field(default=True, alias="ZEN_TELEMETRY")
+    enabled: bool = Field(default=False, alias="ZEN_TELEMETRY")
 
 
 WebSearchProvider = Literal["auto", "perplexity", "exa"]
