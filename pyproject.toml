@@ -413,6 +413,8 @@ known_third_party = ["pydantic", "litellm"]
 # ============================================================================
 
 [tool.bandit]
-exclude_dirs = ["docs", "build", "dist"]
+# Tests are covered by ruff's flake8-bandit rules (see per-file-ignores above),
+# which is where fixture tokens and loopback URL opens are already waived.
+exclude_dirs = ["docs", "build", "dist", "tests"]
 skips = ["B101", "B601", "B404", "B603", "B607"]  # Skip assert, shell injection, subprocess import and partial path checks
 severity = "medium"

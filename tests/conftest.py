@@ -49,3 +49,18 @@ def _isolate_mcp_config(
     monkeypatch.setenv("ZEN_MCP_CONFIG", str(missing))
     monkeypatch.delenv("ZEN_MCP_ONLY", raising=False)
     monkeypatch.delenv("ZEN_MCP_EXCLUDE", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _plain_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make Rich output identical on every developer's machine.
+
+    Many CLI tests force ``isatty()`` to ``True`` to exercise the human-readable
+    code path and then assert on the plain text. Rich picks its color system
+    from ``TERM``, ``COLORTERM``, and ``FORCE_COLOR``, so on a real terminal
+    those assertions would meet ANSI escape codes instead of the words they
+    look for. A dumb terminal renders the same text without any styling.
+    """
+    monkeypatch.setenv("TERM", "dumb")
+    for name in ("COLORTERM", "FORCE_COLOR", "NO_COLOR", "TTY_COMPATIBLE"):
+        monkeypatch.delenv(name, raising=False)
