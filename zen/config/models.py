@@ -40,6 +40,7 @@ from zen.config import codex
 from zen.config.loader import load_settings
 from zen.config.tool_call_ids import TurnCallIdRewriter, dedupe_input
 from zen.config.tool_call_limits import TurnToolCallLimiter
+from zen.llm import request_log
 
 
 if TYPE_CHECKING:
@@ -525,13 +526,37 @@ class ZenProvider(MultiProvider):
             # The ChatGPT subscription backend is always streamed; it has no
             # non-streaming mode to fall back to, so LLM_DISABLE_STREAMING
             # does not apply here.
-            model: Model = _CodexResponsesModel(
-                slug,
-                codex.get_subscription_client(),
-                reasoning_effort=llm.reasoning_effort,
+            model: Model = request_log.RequestLoggingModel(
+                _CodexResponsesModel(
+                    slug,
+                    codex.get_subscription_client(),
+                    reasoning_effort=llm.reasoning_effort,
+                ),
+                model_name=slug,
+                provider="openai-codex",
+                base_url=None,
             )
         else:
             model = super().get_model(model_name)
+            resolved_name = model_name or llm.model or "unknown"
+            if _routes_via_litellm(model):
+                # LiteLLM's callbacks log every reply; only a cancelled attempt
+                # (stream idle timeout, abandoned turn) escapes them.
+                model = request_log.RequestLoggingModel(
+                    model,
+                    model_name=resolved_name,
+                    provider=_litellm_provider(resolved_name),
+                    base_url=self._override_base_url or llm.api_base,
+                    route="litellm",
+                    abandoned_only=True,
+                )
+            else:
+                model = request_log.RequestLoggingModel(
+                    model,
+                    model_name=resolved_name,
+                    provider="openai",
+                    base_url=self._override_base_url or llm.api_base,
+                )
             if llm.disable_streaming:
                 model = _NonStreamingModel(model)
                 # The wrapper emits its single event only once the whole request
@@ -543,6 +568,23 @@ class ZenProvider(MultiProvider):
             max_tool_calls_per_turn=llm.max_tool_calls_per_turn,
             stream_idle_timeout=idle_timeout,
         )
+
+
+def _routes_via_litellm(model: Model) -> bool:
+    """LiteLLM-backed models are captured by the LiteLLM callback, not the wrapper."""
+    from agents.extensions.models.litellm_model import LitellmModel
+
+    return isinstance(model, LitellmModel)
+
+
+def _litellm_provider(model_name: str) -> str | None:
+    """The provider LiteLLM will route ``model_name`` to, if it can tell."""
+    try:
+        import litellm
+
+        return str(litellm.get_llm_provider(model_name)[1])
+    except Exception:  # noqa: BLE001 - unknown model ids are the provider's problem, not the log's
+        return None
 
 
 DEFAULT_MODEL_RETRY = ModelRetrySettings(
@@ -621,6 +663,7 @@ def configure_sdk_model_defaults(settings: Settings) -> None:
     """Apply Zen config to SDK-native defaults."""
     llm = settings.llm
     set_tracing_disabled(True)
+    request_log.install()
     if codex.subscription_model(llm.model):
         return
     _configure_litellm_compatibility()
@@ -773,12 +816,16 @@ def _merge_litellm_headers(headers: dict[str, str]) -> None:
 
 def _register_openai_client_with_headers(llm: LlmSettings, headers: dict[str, str]) -> None:
     from agents import set_default_openai_client
+    from agents.models.openai_provider import shared_http_client
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(
         api_key=llm.api_key or "not-needed",
         base_url=llm.api_base,
         default_headers=dict(headers),
+        # The SDK's shared client is the one the request log observes for
+        # reply status, headers and provider request ids.
+        http_client=shared_http_client(),
     )
     set_default_openai_client(client, use_for_tracing=False)
 

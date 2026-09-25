@@ -307,6 +307,9 @@ ignore = [
 "zen/report/dedupe.py" = ["PLC0415"]
 "zen/telemetry/logging.py" = ["PLC0415"]
 "zen/config/models.py" = ["PLC0415"]
+# LiteLLM is imported lazily: the request log is wired at startup on every
+# route, including the native OpenAI ones that never load LiteLLM.
+"zen/llm/request_log.py" = ["PLC0415"]
 # Heavy inference deps (httpx, openai) imported lazily so auth-status checks
 # don't pull them in.
 "zen/config/codex.py" = ["PLC0415"]

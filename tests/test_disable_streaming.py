@@ -32,6 +32,7 @@ from openai.types.responses import (
 from zen.config import codex, loader
 from zen.config.loader import load_settings
 from zen.config.models import ZenProvider, _NonStreamingModel, _TurnGuardModel
+from zen.llm.request_log import RequestLoggingModel
 
 
 if TYPE_CHECKING:
@@ -312,7 +313,8 @@ def test_get_model_keeps_streaming_by_default(
 
     model = ZenProvider().get_model("openai/gpt-4o-mini")
     assert isinstance(model, _TurnGuardModel)
-    assert model._inner is inner
+    assert isinstance(model._inner, RequestLoggingModel)
+    assert model._inner._inner is inner
 
 
 def test_get_model_guards_subscription_model_but_keeps_it_streaming(
