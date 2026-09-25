@@ -696,6 +696,87 @@ def _do_update(
     }
 
 
+def _do_delete(
+    *,
+    report_id: str,
+    delete_reason: str,
+    agent_id: str | None = None,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
+    """Withdraw a report an agent filed and has since disproved.
+
+    Deletion is for a finding that is not a vulnerability at all. A finding
+    that is real but weaker than filed is revised, not deleted.
+    """
+    report_id = (report_id or "").strip()
+    delete_reason = (delete_reason or "").strip()
+    if not report_id or not delete_reason:
+        missing = "report_id" if not report_id else "delete_reason"
+        return {
+            "success": False,
+            "error": (
+                f"{missing} cannot be empty - name the report you are withdrawing and state "
+                "what disproved it"
+            ),
+        }
+
+    from zen.report.state import ReportRollbackError, get_global_report_state
+
+    report_state = get_global_report_state()
+    if report_state is None:
+        return {
+            "success": False,
+            "error": "Report state unavailable - no reports have been filed yet",
+        }
+
+    try:
+        deleted = report_state.delete_vulnerability_report(
+            report_id,
+            delete_reason=delete_reason,
+            deleted_by_agent_id=agent_id,
+            deleted_by_agent_name=agent_name,
+        )
+    except Exception as e:
+        logger.exception("delete_vulnerability_report persistence failed")
+        if isinstance(e, ReportRollbackError):
+            outcome = (
+                f"{e.cause!s}. The report is still on file, but its on-disk indexes could "
+                "not be rewritten and may be stale until the next report is saved"
+            )
+        else:
+            outcome = f"{e!s}. The report is still on file"
+        return {
+            "success": False,
+            "error": f"Failed to delete report '{report_id}': {outcome}; retry the deletion.",
+            "report_id": report_id,
+        }
+    if deleted is None:
+        return {
+            "success": False,
+            "error": f"Report with id '{report_id}' not found",
+            "report_id": report_id,
+        }
+
+    logger.info(
+        "Vulnerability report %s deleted by %s: %s",
+        report_id,
+        agent_name or agent_id or "an agent",
+        delete_reason[:200],
+    )
+    return {
+        "success": True,
+        "action": "deleted",
+        "message": (
+            f"Report '{report_id}' ({deleted.get('title')}) is withdrawn and no longer "
+            "counts as a finding of this scan. Do not file it again unless new evidence "
+            "proves it."
+        ),
+        "report_id": report_id,
+        "title": deleted.get("title"),
+        "severity": deleted.get("severity"),
+    }
+
+
 async def _do_create(
     *,
     title: str,
@@ -1546,6 +1627,48 @@ async def update_vulnerability_report(
         agent_name=agent_name,
     )
     return json.dumps(_with_warning(result, http_exchange_warning), ensure_ascii=False, default=str)
+
+
+@function_tool(timeout=60)
+async def delete_vulnerability_report(
+    ctx: RunContextWrapper,
+    report_id: str,
+    delete_reason: str,
+) -> str:
+    """Withdraw a vulnerability report that later testing disproved.
+
+    Use this when a finding you filed turns out not to be a vulnerability
+    at all: the exploit only worked because of a mistake in your own test
+    setup (a mixed-up session, a self-inflicted state change, a misread
+    response), the behaviour is documented and intended, or the control
+    you believed was missing is in fact enforced. The report is removed
+    from the scan; it does not stay behind as a zero-severity entry.
+
+    Do NOT use this for a finding that is real but weaker than filed —
+    revise it with ``update_vulnerability_report`` so the severity, the
+    impact and the counterevidence come down together. Do NOT rewrite a
+    report into a "retracted" or "false positive" note either: delete it.
+
+    Only withdraw a report you have re-tested yourself, whoever filed it.
+    Call ``get_report`` first to read what it claims, then state in
+    ``delete_reason`` exactly what disproved it, so the scan history shows
+    who withdrew the finding and why. A withdrawn report cannot be restored; if new
+    evidence later proves the issue, file it again.
+
+    Args:
+        report_id: Id of the report to withdraw (format ``vuln-NNNN``).
+        delete_reason: What disproved the finding, in one or two
+            sentences.
+    """
+    agent_id, agent_name = _caller_identity(ctx)
+    result = await asyncio.to_thread(
+        _do_delete,
+        report_id=report_id,
+        delete_reason=delete_reason,
+        agent_id=agent_id,
+        agent_name=agent_name,
+    )
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 _DEP_SEVERITY_FROM_CVSS = {
