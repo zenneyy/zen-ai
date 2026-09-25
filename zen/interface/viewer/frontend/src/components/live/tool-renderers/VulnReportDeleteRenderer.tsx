@@ -39,7 +39,7 @@ export default function VulnReportDeleteRenderer({ args, result, status }: ToolR
       {title && <div className="text-[15px] text-white/60 line-through">{title}</div>}
       {reason && (
         <div>
-          <span className="text-emerald-400/60 text-sm font-semibold">Why</span>
+          <span className="text-[#02C3F2]/60 text-sm font-semibold">Why</span>
           <div className="mt-1"><TruncatedText text={reason} maxLines={10} /></div>
         </div>
       )}
