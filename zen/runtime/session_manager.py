@@ -334,7 +334,7 @@ async def create_or_reuse(
         report("Placing workspace files")
         try:
             await stage_extra_files(session, extra_file_archive)
-        except Exception:
+        except BaseException:
             await _discard_session(client, session)
             raise
 

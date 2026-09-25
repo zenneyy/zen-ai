@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import tarfile
 from dataclasses import dataclass
@@ -472,6 +473,46 @@ async def test_a_failed_unpack_tears_the_session_down(monkeypatch: pytest.Monkey
                 local_sources=[],
                 extra_files=[{"workspace_path": "/workspace/notes.md", "content": b"x"}],
             )
+    finally:
+        _forget_backend(backend_name)
+
+    assert fake_client.deleted == [fake_session]
+    assert scan_id not in session_manager._SESSION_CACHE
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_unpack_tears_the_session_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run cancelled mid-staging must not leave the sandbox running."""
+
+    class _HangingSession(_Session):
+        async def exec(self, *argv: str, timeout: float | None = None) -> _ExecResult:
+            del argv, timeout
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    fake_session = _HangingSession()
+    fake_client = _Client()
+
+    async def _backend(**_kwargs: Any) -> tuple[Any, Any]:
+        return fake_client, fake_session
+
+    scan_id = "unpack-cancelled"
+    backend_name = f"test-{scan_id}"
+    _use_backend(monkeypatch, backend_name, _backend, supports_bind_mounts=True)
+    try:
+        task = asyncio.create_task(
+            session_manager.create_or_reuse(
+                scan_id,
+                image="img",
+                local_sources=[],
+                extra_files=[{"workspace_path": "/workspace/notes.md", "content": b"x"}],
+            )
+        )
+        while not fake_session.writes:
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     finally:
         _forget_backend(backend_name)
 
