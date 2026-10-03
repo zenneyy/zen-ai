@@ -28,7 +28,7 @@ REASONING="max"               # none | minimal | low | medium | high | xhigh
 
 # ── DO NOT EDIT BELOW THIS LINE ─────────────────────────────────────────────
 
-export ZEN_LLM="openai/${MODEL}"
+export ZEN_LLM="litellm/openai/${MODEL}"
 export OPENAI_BASE_URL="http://127.0.0.1:${BRIDGE_PORT}/v1"
 export OPENAI_API_BASE="http://127.0.0.1:${BRIDGE_PORT}/v1"
 export OPENAI_API_KEY="bridge-local-no-key-needed"
@@ -44,15 +44,6 @@ export ZEN_BRIDGE_EFFORT="${ZEN_BRIDGE_EFFORT:-high}"
 # a slow-but-healthy turn isn't killed mid-flight and reported as a failure.
 export ZEN_BRIDGE_TURN_TIMEOUT_S="${ZEN_BRIDGE_TURN_TIMEOUT_S:-1800}"
 export ZEN_BRIDGE_IDLE_TIMEOUT_S="${ZEN_BRIDGE_IDLE_TIMEOUT_S:-5400}"
-
-# REQUIRED. Zen injects LiteLLM's Anthropic prompt-cache directive whenever the
-# model name contains "claude" (core/inputs.py::_prompt_cache_extra_args). The
-# "openai/" prefix routes through the OpenAI SDK instead of LiteLLM, and
-# AsyncCompletions.create() rejects the unknown kwarg with:
-#   TypeError: unexpected keyword argument 'cache_control_injection_points'
-# Nothing is lost by turning it off -- Claude Code does its own prompt caching
-# server-side, so the client-side directive was never reaching a cache anyway.
-export ZEN_PROMPT_CACHE=0
 
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  Zen → Claude Code subscription bridge                    ║"
