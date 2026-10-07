@@ -1,11 +1,13 @@
 ---
 name: http-request-smuggling
-description: HTTP request smuggling testing covering CL.TE, TE.CL, H2.CL, H2.TE, CL.0/0.CL and client-side desync, pause-based desync, HTTP/2 request tunnelling, and the CONTINUATION flood (DoS), with practical detection, tooling, and exploitation methodology
+description: HTTP request smuggling — CL.TE / TE.CL / H2.CL / H2.TE / CL.0 / 0.CL / client-side desync / pause-based desync / HTTP/2 request tunnelling / CONTINUATION flood DoS; detection, tooling, and exploitation methodology
 ---
 
 # HTTP Request Smuggling
 
 HTTP request smuggling (HRS) exploits disagreements between a front-end proxy and a back-end server about where one HTTP request ends and the next begins. When the two systems parse `Content-Length` and `Transfer-Encoding` headers differently, an attacker can prefix a hidden request to the back-end's socket, which is then prepended to the next legitimate user's request. The impact ranges from bypassing front-end security controls to full cross-user session hijacking.
+
+The advanced+expert depth (HTTP/2-to-HTTP/1 downgrade differentials deep, cache-poisoning / response-queue-poisoning chain construction, WAF bypass classes, blind-confirmation methodology beyond the basic timing probe) lives in `http_request_smuggling_advanced_deep.md`. The 2024–2026 CVE and parser-differential frontier — HTTP Garden's 122 unique parsing discrepancies (LiteSpeed strtoll-octal, Node.js bare-CR, OpenBSD relayd, Python `int()` underscores) and the current CVE families — lives in `http_request_smuggling_novel_deep.md`. This file is the standard-mode entry point: a hunter loading only this file is effective for the base class.
 
 ## Attack Surface
 
@@ -311,6 +313,86 @@ Transfer-Encoding: chunked<CRLF>Transfer-Encoding: x  # TE twice — inject actu
 - Use HTTP/2 header injection: inject newlines in header values if the front-end passes them to HTTP/1.1 back-end unescaped
 - Observe whether the HTTP/2 connection ID corresponds to a persistent HTTP/1.1 connection to the back-end (connection reuse amplifies impact)
 
+## Chaining
+
+Smuggling is a pivot primitive — it transfers a capability rather than reaching a terminal impact by itself. Model as capability transfer, routed by filename.
+
+**Upstream — what grants smuggling:**
+- **HTTP/2-to-HTTP/1 translating front-end** — the H2.CL and H2.TE classes require exactly this shape at the edge; without it, only classic CL.TE/TE.CL apply.
+- **Shared back-end connection pool** — poisoning the pool requires that back-end sockets serve multiple front-end requests. If the front-end opens one back-end connection per HTTP/2 stream (no pool), you can still tunnel a self-contained read but not poison other users.
+- **Ambiguous parser at the back-end** — any back-end that treats CL and TE inconsistently (or ignores CL on GET/redirect endpoints for CL.0) is a candidate.
+
+**Downstream — what smuggling grants:**
+- **Front-end security control bypass** — reach `/admin` past a proxy that denies it (route to `authentication_*` and framework-specific admin surfaces).
+- **Cross-user request capture** — pull another user's request onto a controllable response endpoint; grants their `Cookie` / `Authorization` / body content → session hijack → downstream everything the victim can do. Route to `authentication_jwt.md` if the captured token is a JWT.
+- **Cache poisoning** — inject an attacker-controlled response into a cache keyed by URL; grants XSS delivery, phishing content injection, or clickjacking to every subsequent user. Route to `xss.md` for the payload class delivered via the poisoned response.
+- **WebSocket handshake hijacking** — a smuggled `Upgrade: websocket` can steal a subsequent user's WebSocket; grants read+write over the socket. Route to `csrf.md § WebSocket CSRF (CSWSH)` for the closely-related same-site variant.
+- **HTTP/2 request tunnelling → internal-only path read** — for a self-contained read primitive when connection-per-stream mode prevents pool poisoning. Grants access to `/admin`, cloud metadata endpoints, and other internal paths the front-end blocks externally. Route metadata reachability follow-on to `cloud/*` skills.
+- **Response queue poisoning** — misalign the response queue on a pipelined connection; grants delivery of one user's response to a different user.
+
+**Composite chains — end-to-end paths, each hop routed:**
+1. **CL.TE + cache poisoning → mass XSS** — smuggle a request that injects an XSS payload into a cached response for `/`; every subsequent user gets served the XSS. Chain routes: smuggling (this file) → cache (poisoning here) → XSS delivery (`xss.md`).
+2. **H2.CL + admin-endpoint reach → RCE on admin API** — bypass the front-end auth check on `/admin/plugins/upload`, upload a webshell via the admin plugin API, execute. Chain: smuggling → auth bypass → plugin upload → `rce.md`.
+3. **CL.0 client-side desync + credentialed same-origin fetch → victim-driven state change** — CSD attacks against single-server sites (no front-end): victim's browser poisons its own connection; the follow-up same-origin navigation executes the smuggled request. Chain: CSD (this file) → CSRF-shaped state change (`csrf.md`).
+4. **HTTP/2 tunnelling → cloud metadata read** — tunnel a request to `169.254.169.254/latest/meta-data/iam/...` through the front-end's back-end connection. Reads-only from the smuggling perspective; credential extraction routes to `cloud/aws.md` etc.
+
+Chaining is reachability/enablement — a granted capability, not a severity multiplier.
+
+## Frontier CVE Routes
+
+Base names + one-line class shape; the version tables and mechanism decomposition live in the novel sibling (§2 CVE single-ownership).
+
+- **HTTP Garden discovery corpus (2024)** — arXiv:2405.17737 (Kallus et al., May 2024) — differential fuzzing of HTTP/1.1 request streams identified 122 unique parsing discrepancies across popular servers; 68 patched, 39 designated exploitable. Four canonical smuggling classes emerged: LiteSpeed strtoll radix-inference (leading `0` interpreted as octal), Node.js bare-CR chunk termination (fixed in 21.2.0), OpenBSD relayd single-participant smuggling, Python `int()` digit-separating underscores (AIOHTTP/Gunicorn/Tornado). Full class dissection + version tables in `http_request_smuggling_novel_deep.md § HTTP Garden — Parser-Differential Frontier`.
+- **HTTP/2 CONTINUATION Flood cluster (Apr 2024)** — CERT/CC VU#421644 disclosed a class in which unterminated `CONTINUATION` frames force unbounded HPACK-decode buffering → OOM/CPU exhaustion. Affected: Node.js (CVE-2024-27983), nghttp2 (CVE-2024-28182), Envoy (CVE-2024-27919 + CVE-2024-30255), Apache Traffic Server (CVE-2024-31309), amphp/http (CVE-2024-2653). Version boundaries + mechanism-per-implementation in `http_request_smuggling_novel_deep.md § HTTP/2 CONTINUATION Flood — 2024 CVE Cluster`.
+- **Tomcat HTTP trailer smuggling — CVE-2023-46589** — if verified against NVD, chunked trailer parsing differential. Version boundary in `http_request_smuggling_novel_deep.md § Tomcat HTTP Trailer Handling — CVE-2023-46589`.
+- **Apache HTTP Server HTTP/2 memory exhaustion — CVE-2024-27316** — HTTP/2 header-processing class expression against Apache httpd (nghttp2-buffer path). Version boundary in `http_request_smuggling_novel_deep.md § Apache HTTP/2 Memory Exhaustion — CVE-2024-27316`.
+- **Gunicorn TE-header HTTP request smuggling — CVE-2024-1135** — Python Gunicorn's HTTP parser accepted specific Transfer-Encoding variations that produced smuggling against paired front-ends. Full mechanism + version boundary in `http_request_smuggling_novel_deep.md § Gunicorn TE-Header Smuggling — CVE-2024-1135`.
+- **lighttpd connection-slot DoS — CVE-2022-41556** — class-broader-than-CONTINUATION historical anchor: connection-slot exhaustion via HTTP-parsing behavior. Cite as class context, not current-frontier. Details in `http_request_smuggling_novel_deep.md § Class-Broader Historical Anchors`.
+
+## Wire-Format & Proxy Composition Fingerprinting
+
+Smuggling variants are decided by the composition of the front-end and back-end at the target. Fingerprint the composition before choosing which variant to probe — a Cloudflare + Nginx + Node.js target has a different smuggling surface than an AWS ALB + Envoy + Python target, and matching probes to composition avoids wasted requests and false negatives.
+
+**Front-end / CDN identification:**
+- `Server: cloudflare`, `CF-RAY`, `CF-Cache-Status` → Cloudflare. HTTP/2-to-HTTP/1 downgrade default; H2.CL / H2.TE are the primary vectors.
+- `X-Amz-Cf-Id` → AWS CloudFront. Downgrade behavior varies per origin config.
+- `Server: AkamaiGHost`, `X-Akamai-*` → Akamai. Historical smuggling class documented.
+- `Server: nginx` (bare) → Nginx as edge. Watch for the `%2e%2e/` and `\r\n` handling; Nginx normalizes aggressively.
+- `Server: awselb` → AWS ALB. HTTP/2 support with per-config downgrade.
+- No `Server` header + short 404 body → API gateway (rate-limiting or WAF-only edge).
+- `X-Envoy-*` → Envoy sidecar or Istio-managed egress.
+
+**Back-end identification:**
+- `X-Powered-By: PHP/X.Y` → PHP-FPM or Apache mod_php.
+- `X-Powered-By: Express` → Node.js/Express. Node's HTTP parser (llhttp) had the CVE-2024-27983 CONTINUATION flood; version fingerprint matters.
+- `X-Runtime` → Rails.
+- `Server: gunicorn/X.Y.Z` → Gunicorn. Its Python-native HTTP parser had CVE-2024-1135 in the class window.
+- `Server: uWSGI/X.Y.Z` → uWSGI.
+- `HTTP/2 200` on OPTIONS responses + `Alt-Svc: h3=":443"` → modern proxy stack with HTTP/3 support (adds another parser layer).
+- `Server: Apache/X.Y.Z (Ubuntu)` → Apache httpd. CVE-2024-27316 CONTINUATION-flood variant.
+- Distinct 400 error page shapes reveal the parser layer that rejected the malformed request.
+
+**Composition probe — three-request scan:**
+1. `HEAD /` — captures top-level headers (Server, X-Powered-By, CDN identifiers).
+2. `GET /nonexistent-<rand>` — 404 shape reveals which layer produces default errors.
+3. `OPTIONS /` — some proxies return their own OPTIONS response; some pass through — the difference distinguishes edge from origin.
+
+Combined, the three probes usually identify (a) the edge CDN/WAF, (b) the reverse proxy at the origin, and (c) the back-end language/framework. Choose smuggling variants to match: HTTP/2-only edge? try H2.CL and H2.TE. HTTP/1.1-only edge? try classic CL.TE, TE.CL. Single-server (no edge)? try CL.0 and client-side desync.
+
+## Confirmation Discipline
+
+Smuggling detection has a high false-positive rate — timing variance, connection pool eviction, load balancer round-robin, and normal server GC pauses all produce delays that look like desync. Anchor every claim to a reproducible signal.
+
+- **Two-probe consistency** — every timing-based confirmation must reproduce on the second try. A single 10-second delay is not evidence; two consecutive 10-second delays with a normal request between them is a signal.
+- **Differential response, not just timing** — the strongest confirmation is a follow-up request receiving an unexpected response (`404` where you expect `200`, admin content where you expect public). Timing without a paired differential is weaker.
+- **Unique-marker inclusion** — include a distinctive string (`ZENSMUG-<rand>`) in the smuggled prefix; the follow-up response should reflect that marker for a genuine positive.
+- **Single-server probe for CL.0 requires connection reuse** — the setup + follow-up must ride the same TCP connection (`Connection: keep-alive`). A tool that opens a new connection per request cannot detect CL.0 at all.
+- **Cache-poisoning positives require cache-key match** — a "successful" cache poison that doesn't reproduce for a different user IP/User-Agent may have hit a personalized cache-key (Vary), not a shared one. Test with two distinct client fingerprints.
+- **Response queue poisoning requires pipelining** — the tool must actually pipeline requests, not send them serially. Turbo Intruder's `pipeline` mode is required.
+- **CSD requires a real browser** — client-side desync probes with a scriptable browser client (Playwright, headless Chrome), not curl. Curl won't reuse the connection the way a browser does.
+
+The finding is *the specific smuggling class + the specific back-end that misparses + the specific impact demonstrated*, not "we sent a probe and got a delay." Report the exact bytes, the exact response, and the exact reproduction rate across N trials.
+
 ## Testing Methodology
 
 1. **Map the proxy chain** — identify front-end (CDN, load balancer, WAF) and back-end (app server)
@@ -354,6 +436,26 @@ Transfer-Encoding: chunked<CRLF>Transfer-Encoding: x  # TE twice — inject actu
 5. In capture attacks, set `Content-Length` in the smuggled prefix larger than your partial body by 50–100 bytes to catch a full auth header from the next user
 6. Test during low-traffic periods first to avoid affecting real users; always get explicit authorization for capture attempts
 7. If timing probes are inconsistent, pipeline two requests over the same connection and look for unexpected response swapping
+
+## Version-Fingerprint Reference
+
+Compact reference of the current smuggling posture for widely-deployed back-ends. Version data as of 2026-09-29; verify current advisories before assessment.
+
+| Back-end | CL.TE | TE.CL | H2.CL / H2.TE | CL.0 | CONTINUATION flood |
+|---|---|---|---|---|---|
+| Node.js ≥ 21.2.0 | patched (llhttp) | patched | fingerprint-per-front-end | class-dependent | fixed (CVE-2024-27983) |
+| Node.js < 21.2.0 | class-dependent | class-dependent | live via bare-CR (HTTP Garden) | class-dependent | VULNERABLE |
+| Apache httpd ≥ 2.4.59 | patched core | patched core | check front-end | class-dependent | fixed (CVE-2024-27316) |
+| Apache Traffic Server (ATS) | see HTTP Garden — LiteSpeed strtoll radix + transducer chain | forwards CR bytes in optional whitespace | class-dependent | class-dependent | fixed (CVE-2024-31309) in current |
+| Nginx (any current) | patched core; front-end for many stacks | patched core | strong front-end for H2 | class-dependent per config | not applicable (no HTTP/2 origin default) |
+| Envoy | patched | patched | check config | class-dependent | fixed (CVE-2024-27919 + CVE-2024-30255) |
+| HAProxy | patched | patched | HTTP/2 support strong | class-dependent | not directly affected |
+| Tomcat 9.x / 10.x / 11.x | patched | patched | via connector | see CVE-2023-46589 for trailer class | not applicable |
+| Gunicorn (< fix) | class-dependent | class-dependent | fingerprint-per-front-end | class-dependent | not the CONTINUATION-flood cluster |
+| LiteSpeed | see HTTP Garden — strtoll octal in Content-Length | class-dependent | class-dependent | class-dependent | verify per version |
+| OpenBSD relayd | see HTTP Garden — single-participant smuggling | class-dependent | HTTP/1.1-only | class-dependent | not applicable |
+
+Match the row to the target's `Server` header (or fingerprinted equivalent) before probing. Full mechanism prose + specific version boundaries live in `http_request_smuggling_novel_deep.md`.
 
 ## Tooling
 

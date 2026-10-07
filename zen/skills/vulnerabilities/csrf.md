@@ -1,11 +1,13 @@
 ---
 name: csrf
-description: CSRF testing covering token and double-submit bypass, SameSite nuances (the Chrome Lax+POST window and same-site sibling pivots), Fetch Metadata defenses, CORS misconfigurations, cross-site WebSocket hijacking (CSWSH), and state-changing request abuse, with copy-pastable PoC templates
+description: CSRF — token/double-submit bypass, SameSite (Chrome Lax+POST window; same-site sibling pivots), Fetch Metadata, CORS misconfig, CSWSH (WebSocket hijacking), state-change abuse; PoC templates included
 ---
 
 # CSRF
 
 Cross-site request forgery abuses ambient authority (cookies, HTTP auth) across origins. Do not rely on CORS alone; enforce non-replayable tokens and strict origin checks for every state change.
+
+The advanced+expert depth (sub-resource CSRF, cross-origin auth-flow abuse, CORS-relaxed exploits, JSON-CSRF depth, WebTransport / SSE CSRF, CSWSH hardened-target bypasses, PoC-template variants for edge cases) lives in `csrf_advanced_deep.md`. The 2024–2026 CVE frontier — Spring STOMP CSRF, ASP.NET Core AntiForgery bypass via smuggling (twofer with `http_request_smuggling_novel_deep.md`), OAuth CSRF RFC 9700 shift, Rails `protect_from_forgery` OTP-XOR class, SSE-CSRF class — lives in `csrf_novel_deep.md`. This file is the standard-mode entry point: a hunter loading only this file is effective for the base class.
 
 ## Attack Surface
 
@@ -250,11 +252,41 @@ cookie, because they then control both halves:
 - Webhooks and back-office tools sometimes expose state-changing GETs intended for staff
 - Confirm CSRF defenses there too
 
-## Chaining Attacks
+## Chaining
 
-- CSRF + IDOR: force actions on other users' resources once references are known
-- CSRF + Clickjacking: guide user interactions to bypass UI confirmations
-- CSRF + OAuth mix-up: bind victim sessions to unintended clients
+CSRF is a delivery primitive — it transfers a capability granted by ambient authority to a downstream action. Model as capability transfer, routed by filename.
+
+**Upstream — what grants CSRF:**
+- **Session cookie without SameSite=Strict** — the ambient-authority substrate. Lax (default) opens top-level GET + the 2-minute Lax+POST window; None opens everything cross-site.
+- **Sibling subdomain foothold** — XSS or subdomain takeover on `sub.example.com` lets same-site cookie policies fire against `example.com` (SameSite is same-*site*, not same-*origin*). Route to `subdomain_takeover.md` for the takeover primitive.
+- **Login CSRF chain input** — force the victim to authenticate as the attacker; subsequent actions land in the attacker's account (chain input for account-linking abuse).
+- **OAuth flow initiation** — CSRF against `/authorize` or callback URLs is the OAuth-CSRF class (RFC 9700 upgrades the state-parameter requirement from SHOULD to MUST).
+
+**Downstream — what CSRF grants:**
+- **State change under victim's identity** — the canonical impact; grants password/email change, MFA disable, funds transfer, account deletion. Terminal for many findings.
+- **IDOR reach** — CSRF + IDOR: force actions on other users' resources once references are known. Route to `idor.md` for the reference-enumeration primitive.
+- **Cross-origin exfiltration via CSWSH** — read+write over an authenticated WebSocket; different from form-CSRF which is blind. See the CSWSH section above.
+- **OAuth account linking** — bind the victim's provider account to the attacker's app account (or vice versa), yielding persistent takeover.
+- **SPA state pollution** — modern React/Vue/Angular SPAs using cookie sessions still expose CSRF surface; pollution of stored client state, sometimes chained with client-side rendering.
+- **HTTP smuggling → CSRF bypass** — a smuggled request can hit an endpoint that the anti-CSRF layer thinks was verified upstream, effectively bypassing the CSRF check. Route to `http_request_smuggling.md`; the CSRF-specific expression is at `csrf_novel_deep.md § ASP.NET Core AntiForgery Bypass — CVE-2025-55315`.
+
+**Composite chains — end-to-end paths, each hop routed:**
+1. **Login CSRF → attacker-account binding → OAuth linking → persistent takeover** — victim submits attacker-supplied login credentials, then OAuth-links their real identity provider to the attacker's account; attacker now has persistent access under victim's provider identity. Chain: CSRF (this file) → OAuth linking → persistent takeover.
+2. **CSWSH → read tokens → API takeover** — victim visits attacker page; attacker opens authenticated WebSocket, requests tokens/API keys pushed over the socket, exfiltrates. Chain: CSRF/CSWSH (this file) → token disclosure → API access as the victim's role.
+3. **Sibling subdomain XSS → cookie injection → double-submit satisfy → CSRF** — subdomain XSS sets a `Domain=.example.com` cookie carrying an attacker-chosen anti-CSRF token; the CSRF request then includes the matching body token; the double-submit check passes because both values are attacker-controlled. Chain: XSS (`xss.md`) → cookie injection → CSRF (this file).
+4. **HTTP smuggling → antiforgery bypass → CSRF** — front-end antiforgery check bypassed by smuggling a request that appears authenticated; the smuggled request performs the state change. Chain: smuggling (`http_request_smuggling.md`) → antiforgery bypass → state change (this file).
+
+Chaining is reachability/enablement — a granted capability, not a severity multiplier.
+
+## Frontier CVE Routes
+
+Base names + one-line class shape; the version tables and mechanism decomposition live in the novel sibling (§2 CVE single-ownership).
+
+- **Spring Framework STOMP CSRF — CVE-2025-41254** — WebSocket-CSRF class expression: Spring's STOMP-over-WebSocket messaging didn't apply CSRF protection to STOMP frames sent over an authenticated session, allowing cross-origin STOMP-message injection. Full version table + mechanism dissection in `csrf_novel_deep.md § Spring Framework STOMP CSRF — CVE-2025-41254`.
+- **ASP.NET Core AntiForgery bypass via HTTP smuggling — CVE-2025-55315** — CVSS 9.9 (highest ASP.NET Core severity in the class): HTTP request smuggling allows bypassing the ASP.NET Core AntiForgery middleware. **Batch-7 twofer** — the primary owner is `http_request_smuggling_novel_deep.md § ASP.NET Core Smuggling — CVE-2025-55315`; the CSRF-specific impact framing lives at `csrf_novel_deep.md § ASP.NET Core AntiForgery Bypass — CVE-2025-55315`.
+- **OAuth CSRF cluster — RFC 9700 (Jan 2025) upgraded state/PKCE from SHOULD to MUST** — several 2024–2026 CVEs exemplify the class: `CVE-2025-68481` (fastapi-users OAuth state token without random claim), `CVE-2025-66629` (HedgeDoc missing OAuth2 `state` parameter). Full cluster + RFC-9700 impact framing in `csrf_novel_deep.md § OAuth CSRF — RFC 9700 State/PKCE Shift`.
+- **SSE (EventSource) CSRF class — Algernon CVE-2026-46431** — SSE uses CORS "simple request" semantics (no custom headers, no preflight); auto-reconnect replays credentials; an SSE endpoint with `ACAO: *` returning user-specific data is a live cross-origin read primitive. Anchor CVE + technique-class framing in `csrf_novel_deep.md § SSE (EventSource) CSRF Class`.
+- **Rails `protect_from_forgery` OTP-XOR technique class** — no CVE (framework-wide technique disclosure); the OTP bundled with the CSRF token ciphertext lets attackers Base64-decode the token, extract the OTP, XOR to recover the raw token, and re-encrypt with attacker OTP. Technique-class framing in `csrf_novel_deep.md § Rails protect_from_forgery OTP-XOR Class`.
 
 ## Testing Methodology
 
@@ -265,6 +297,53 @@ cookie, because they then control both halves:
 5. **Attempt preflightless delivery** - Form POST, text/plain, multipart/form-data
 6. **Test navigation** - Top-level GET navigation
 7. **Cross-browser validation** - Behavior differs by SameSite and navigation context
+
+## Sink Fingerprinting
+
+Before firing a CSRF PoC, classify the target endpoint — the shape decides which delivery vector works and which confirmation oracle applies.
+
+**State-change endpoints classified by parser:**
+- **Form-encoded endpoint** (`application/x-www-form-urlencoded`) — auto-submit form works directly; no preflight. Highest-value CSRF surface.
+- **Multipart endpoint** (`multipart/form-data`) — auto-submit form with `enctype="multipart/form-data"`; no preflight. File-upload / delete endpoints commonly fall here.
+- **JSON endpoint that accepts `text/plain`** — server-side parser accepts non-preflighted body; craft padded JSON with a form. Common in older Node/Express apps.
+- **JSON endpoint that requires `application/json`** — the `application/json` Content-Type triggers CORS preflight; simple CSRF fails without a CORS misconfig. Confirmed non-vulnerable to naive CSRF unless CORS allows credentials from arbitrary origins.
+- **GraphQL endpoint** — GET-based queries or persisted queries may bypass POST-only defenses; POST-based requires JSON parser fingerprint above.
+- **WebSocket handshake** — plain HTTP GET with `Upgrade: websocket` carries cookies without SameSite=Lax's POST restriction — CSWSH class if Origin isn't checked.
+
+**Session-cookie shape decides delivery vector:**
+- `SameSite=Strict` — cookie NOT sent cross-site at all; CSRF blocked at cookie layer (still test sibling subdomain XSS chains).
+- `SameSite=Lax` explicit — cookie sent on top-level cross-site GET only; the 2-minute Lax+POST window does NOT apply (that's for defaulted-Lax only).
+- `SameSite=Lax` defaulted (no explicit attribute + Chrome ≥ Feb-2020 default) — Lax+POST 2-minute window applies to fresh cookies.
+- `SameSite=None; Secure` — cookie sent on all cross-site requests; full CSRF surface.
+- `HttpOnly` — irrelevant to CSRF (doesn't affect cross-site sending, only JS read).
+- Session in `Authorization: Bearer <token>` — not a cookie, no ambient authority, no CSRF surface (unless the app also accepts a session cookie fallback).
+
+The `Set-Cookie` header on a login response is the primary fingerprint — capture it, parse the `SameSite` attribute (or its absence), record.
+
+## Confirmation Discipline
+
+CSRF's confirmation surface is straightforward but has failure modes worth naming.
+
+- **Actual state change with paired before/after evidence** is the strongest signal. `GET /account/settings` before + `GET /account/settings` after the CSRF PoC shows the field change (email, MFA state, etc.).
+- **Response-status alone is not confirmation** — a 200 on the CSRF POST may indicate the endpoint accepted the request without applying the state change (silent failure, or CSRF protection returning 200 with an error page). Verify the state via a follow-up read.
+- **PoC hosted on a genuinely-cross-origin domain** — a PoC hosted on `attacker.localhost` or a same-site subdomain of the target is not proof of cross-origin CSRF; the same-site policy passes. Use an unrelated domain (`attacker.tld`, a public sandbox, an nip.io host with a distinct IP).
+- **Cookie-context match** — the PoC must run in the victim's browser with the target's session cookie present. Reproducing in an incognito tab (no session) yields a different response (usually 401/302), which isn't CSRF evidence.
+- **Browser-matrix consideration** — SameSite defaults differ historically across browsers; a Chrome-verified finding may not reproduce on Firefox, Safari, or older Edge. State the browser + version tested.
+- **Login-CSRF confirmation** — the CSRF request logs the victim in as the attacker; verify by observing the attacker-account UI in the victim's session (username, avatar), not by the login-response status alone.
+
+The finding is *the specific state change, cross-origin, without user interaction beyond page visit*. Anything short of that is a partial confirmation.
+
+## Tooling
+
+- **Burp Suite (community + pro) — CSRF PoC generator** — right-click a request → "Engagement tools" → "Generate CSRF PoC" produces an HTML form auto-submit page for form-encoded and multipart requests. Adjust content-type for JSON-via-text/plain variants.
+- **OWASP ZAP CSRF scanner** — automated tokens/Origin checks; false positives common on endpoints that always return 200. Use as a first pass, verify manually.
+- **`csurf-explorer`** — community tool for automated CSRF finding across a target's endpoints; parses forms and infers state-change endpoints.
+- **Browser DevTools + Fetch tab** — for iterating on cross-origin fetch PoCs; the Network panel shows preflight vs simple request and the eventual response.
+- **Playwright / Puppeteer / headless Chrome** — automated confirmation for CSWSH (needs a real browser) and Lax+POST-window timing (requires exact 120-second window). Also useful for cross-browser matrix verification.
+- **`csrf-poc-generator` (npm)** — batch PoC generation from a Burp export.
+- **`ffuf` for endpoint enumeration** — before CSRF-testing, sweep for state-change endpoints (`--filter-code 405` finds endpoints that reject method X but might accept POST/GET differently).
+- **`gau` + `hakrawler`** — passive URL discovery from waybackmachine/CommonCrawl; useful for finding forgotten state-change endpoints.
+- **`interactsh-client`** — OAST for confirming that a CSRF endpoint's server-side handler makes an outbound callback (e.g., webhook creation, notification dispatch).
 
 ## PoC Templates
 
@@ -326,6 +405,83 @@ Top-level GET (for GET-honoring state changes / SameSite=Lax):
 - Token verification present and required; Origin/Referer enforced consistently
 - No cookies sent on cross-site requests (SameSite=Strict, no HTTP auth) and no state change via simple requests
 - Only idempotent, non-sensitive operations affected
+
+Common shapes that *look like* CSRF but are not:
+
+- **Test-endpoint 200 with no state change** — the target returned 200 for the CSRF POST but the follow-up read shows no state change. The endpoint may require a token in a header the CSRF PoC didn't send; token was missing → server rejected silently but returned 200. Report as "endpoint accepts request, does not apply state change without proper CSRF token."
+- **Reproduction only in test environment** — a target with SameSite=Lax in prod but None in staging is CSRF-testable in staging but not in prod. State the environment.
+- **Reproduction only in the tester's browser session** — running the PoC in a browser where the tester is logged in as the target proves cookie forwarding, not cross-origin CSRF. Reproduce from a fresh browser with a separate victim session.
+- **Same-origin "PoC" hosted on target's own domain** — the same-site policy passes; no CSRF is being tested. Use a genuinely-cross-origin host.
+- **Old Firefox / Safari that ignore SameSite** — if a target relies on SameSite as its sole defense, an old browser bypasses it — but the CSRF finding requires the target's realistic user base to include old browsers. Note the browser matrix.
+- **CORS Allow-Origin: * on a state-change endpoint** — this looks like a CORS misconfiguration but doesn't grant CSRF because credentials aren't sent unless `Access-Control-Allow-Credentials: true` is also set. Verify both headers.
+
+## Response Behavior Fingerprinting
+
+Before firing CSRF probes, fingerprint what the target's response behavior tells you about CSRF posture. A three-request scan reveals the CSRF middleware's presence, coverage, and strictness.
+
+**Probe 1 — request state-change without any CSRF-defense header:**
+
+```
+POST /account/action HTTP/1.1
+Host: target.example.com
+Cookie: session=<attacker-session>
+
+field=value
+```
+
+Response shape:
+- 403 with CSRF-token-missing error → CSRF middleware present + token-based.
+- 403 with generic auth error → different auth failure, not CSRF (attacker session may not have permissions).
+- 200 with successful state change → CSRF middleware absent or not applied to this endpoint.
+- 200 with error-page-shape response → likely CSRF middleware silently rejecting; verify state didn't change.
+
+**Probe 2 — request with attacker-crafted Origin header:**
+
+```
+POST /account/action HTTP/1.1
+Host: target.example.com
+Origin: https://evil.attacker.tld
+Cookie: session=<attacker-session>
+
+field=value
+```
+
+Response shape:
+- 403 with Origin-rejection error → Origin check enforced.
+- Same response as Probe 1 → no Origin check.
+- 400 with malformed-request-shape error → possibly rejecting the header itself.
+
+**Probe 3 — request with no Origin header:**
+
+```
+POST /account/action HTTP/1.1
+Host: target.example.com
+Cookie: session=<attacker-session>
+
+field=value
+```
+
+Response shape:
+- 403 with missing-Origin error → strict Origin enforcement (fail-closed).
+- Same as Probe 1 → no Origin check or fail-open on missing.
+
+The three probes together reveal: (a) CSRF middleware presence, (b) Origin check presence + fail-open/closed posture, (c) whether the endpoint is genuinely protected.
+
+## Detection Signatures for Defenders
+
+Defender-side signal shapes that fire during CSRF attempts; useful for purple-team overlap.
+
+- **Cross-origin `Origin` / `Referer` headers on state-change endpoints** — SIEM rule matching state-change routes where the `Origin` header doesn't match the app's own domain (allowing subdomain matches per your same-site scope).
+- **Sudden spike in state-change requests from a single IP or a browser fingerprint** — CSRF at scale (e.g., admin panel state changes across many accounts) produces a burst signal.
+- **State-change endpoints hit without a preceding auth request** — CSRF sessions typically don't include a fresh login; the session was pre-existing. Anomaly.
+- **Anti-forgery-token validation failures** — every framework's CSRF middleware logs the failure. Django's `django.security.csrf`, ASP.NET Core's `Microsoft.AspNetCore.Antiforgery`, Rails' `ActionController::InvalidAuthenticityToken`. Spike detection on any of these is a CSRF-attempt signal.
+- **Cross-origin WebSocket handshakes without Origin allowlist match** — CSWSH signature; server-side WebSocket-upgrade logs should record the `Origin` header per handshake and alert on unexpected origins.
+
+**Compensating controls:**
+- `SameSite=Strict` on session cookies where feasible (breaks legitimate cross-site links, so per-app trade-off).
+- Fetch Metadata middleware (`Sec-Fetch-Site: cross-site` rejection) — as of 2024–2026 not shipped as framework default in any major framework; community middleware exists for Django, Spring, Express, Laravel — deploy explicitly.
+- Anti-forgery-token double-submit with the token in a JS-set header (not a hidden form field) — requires attacker JS execution to forge, moves the exploit path to XSS.
+- Origin allowlist enforcement on WebSocket handshakes.
 
 ## Impact
 
