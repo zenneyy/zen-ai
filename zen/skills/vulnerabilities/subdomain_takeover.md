@@ -111,11 +111,14 @@ Two rows carry corrections worth stating plainly: **CloudFront and Fastly
 are not takeover-able by claiming an alternate domain** — CloudFront rejects
 a CNAME already associated with another distribution (`CNAMEAlreadyExists`)
 and Fastly requires TLS/domain verification, so their unclaimed-serving
-bodies are recon signals, not proof of claimability. **Azure is the highest-
-yield modern surface**: deleting an App Service, Traffic Manager profile,
-Cloud Service, storage account, or CDN endpoint frees a globally unique name
-that resolves `NXDOMAIN`, and re-creating that exact name in any Azure
-tenant rebinds the dangling CNAME.
+bodies are recon signals, not proof of claimability. **Azure remains a
+high-yield surface for most FQDN-bearing services**: deleting an App
+Service, API Management, Container Instance, or storage account frees a
+globally unique name that resolves `NXDOMAIN`, and re-creating it in any
+Azure tenant rebinds the dangling CNAME — but a subset of resource types
+is now protected by alias-record coupling and per-domain preclaim
+mechanics; see `subdomain_takeover_novel_deep.md § Azure Alias-Record
+Scope and asuid Preclaim` for the current boundary.
 
 TLS clues: certificate CN/SAN referencing the provider default host instead
 of the custom subdomain, or the SNI returning the provider's wildcard cert
@@ -346,7 +349,7 @@ it from P4 defacement to P1/P2):
 - Score severity based on current claimability plus trusted-origin impact, not just a provider-branded error page
 - When evaluating severity, use `web_search` (if available) for the exact provider/product to confirm whether it now enforces subdomain takeover prevention such as TXT/custom-domain ownership verification or reserved-hostname protections; if search is unavailable, do not treat that absence as evidence that the provider prevents claiming
 - If you have positively confirmed the provider currently prevents third-party claiming and you cannot bypass that control, treat the finding as low severity rather than a confirmed takeover — an unconfirmed provider control is not grounds for downgrading
-- Reserve high/critical severity for cases where you can claim the resource or strongly prove claimability and show meaningful impact such as OAuth redirect abuse, cookie scope abuse, CSP trust, email receipt, or NS delegation control. E.g. Elastic Beanstalk takeovers are still generally legitimate.
+- Reserve high/critical severity for cases where you can claim the resource or strongly prove claimability and show meaningful impact such as OAuth redirect abuse, cookie scope abuse, CSP trust, email receipt, or NS delegation control. The live cloud-takeover frontier is actively narrowing — AWS and Azure have both introduced provider-side preclaim and namespace-reservation mechanics that make several historically-claimable patterns unexploitable on net-new deployments while leaving legacy targets reachable; see `subdomain_takeover_novel_deep.md` for the current provider-by-provider boundary.
 
 ## False Positives
 

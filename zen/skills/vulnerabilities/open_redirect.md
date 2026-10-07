@@ -7,6 +7,8 @@ description: Open redirect testing for phishing pivots, OAuth token theft, and a
 
 Open redirects enable phishing, OAuth/OIDC code and token theft, and allowlist bypass in server-side fetchers that follow redirects. Treat every redirect target as untrusted: canonicalize and enforce exact allowlists per scheme, host, and path.
 
+For 2024–2026 CVE mechanism decompositions (authentik CVE-2024-52289, urllib3 CVE-2025-50181 and CVE-2025-50182, URL-parser-disagreement SSRF via vLLM CVE-2026-25960), the measured 2026 URL-parser differentials with loopback-dispatch SSRF proof, the Claroty/Snyk 16-library framework's current frontier status, and the OAuth 2.1 / RFC 9700 strict-redirect-URI shift, load `open_redirect_novel_deep.md`. For the five inconsistency classes (scheme / slash / backslash / URL-encoded-data / scheme-mixup), framework-specific redirect sinks, OAuth redirect_uri chain depth, SPA/service-worker/WebSocket sinks, server-side fetcher SSRF chains, and composite-chain construction, load `open_redirect_advanced_deep.md`.
+
 ## Attack Surface
 
 **Server-Driven Redirects**
@@ -21,12 +23,17 @@ Open redirects enable phishing, OAuth/OIDC code and token theft, and allowlist b
 **Multi-Hop Chains**
 - Only first hop validated
 
+**Fetcher Pipelines**
+- Server-side link unfurlers, webhook delivery, image fetchers, PDF-from-URL converters, OpenGraph scrapers — any pipeline that follows redirects composes with open redirect into SSRF
+
 ## High-Value Targets
 
 - Login/logout, password reset, SSO/OAuth flows
 - Payment gateways, email links, invite/verification
 - Unsubscribe, language/locale switches
 - `/out` or `/r` redirectors
+- Webhook delivery endpoints, link preview pipelines, image fetchers, OpenGraph scrapers
+- OIDC `post_logout_redirect_uri` (routinely validated more weakly than `redirect_uri`)
 
 ## Reconnaissance
 
@@ -36,6 +43,16 @@ Open redirects enable phishing, OAuth/OIDC code and token theft, and allowlist b
 - OAuth/OIDC/SAML: `redirect_uri`, `post_logout_redirect_uri`, `RelayState`, `state`
 - SPA: `router.push`/`replace`, `location.assign`/`href`, meta refresh, `window.open`
 - Headers: `Host`, `X-Forwarded-Host`/`Proto`, `Referer`; server-side Location echo
+- Config fields: webhook destination, image fetch URL, link preview target, API callback URL
+
+### Library and Framework Fingerprinting
+
+Identify the server's URL-parser and HTTP-fetcher libraries before firing — the measured matrix below tells you which primitives are live against which parser pairs.
+
+- **Error strings and response shapes** leak the framework: `IsLocalUrl must be used with absolute URL` indicates ASPNET; `url_has_allowed_host_and_scheme` in a stack trace indicates Django; `redirect_to with :only_path => true` indicates Rails.
+- **Dependency manifests**: `requirements.txt`, `Pipfile.lock`, `package-lock.json`, `Gemfile.lock`, `pyproject.toml`, `/.well-known/dependency-manifest` endpoints.
+- **Response-header patterns**: specific CDN/proxy headers (`CF-Ray`, `X-Served-By`) narrow the deployment shape.
+- **OIDC discovery**: `/.well-known/openid-configuration` reveals the authorization server (`authentik`, `keycloak`, `auth0`, etc.).
 
 ### Parser Differentials
 
@@ -96,12 +113,17 @@ those — but if the app then forwards the *raw* value to a `Location:` header
 or `location =`, the browser still navigates to `evil.com`. Validate the
 value you actually emit, not a re-parse of it.
 
+For the measured 2026 differential between CPython 3.12/3.13 and urllib3 2.8.0, including a demonstrated loopback-dispatch SSRF proof, and for the five inconsistency classes with full exploitation methodology, load `open_redirect_advanced_deep.md § Backslash Confusion Class` and `open_redirect_novel_deep.md § Measured 2026 URL-Parser Differentials`.
+
 ### Encoding Bypasses
 
 - Double encoding: `%2f%2fevil.com`, `%252f%252fevil.com`
 - Mixed case and scheme smuggling: `hTtPs://evil.com`, `http:evil.com`
 - IP variants: decimal 2130706433, octal 0177.0.0.1, hex 0x7f.1, IPv6 `[::ffff:127.0.0.1]`
 - User-controlled path bases: `/out?url=/\evil.com`
+- Fully-encoded scheme-host: `https%3A%2F%2Fevil.com/` (some lenient parsers decode before reject)
+
+The deep-research pass confirmed one URL-encoded primitive does NOT reproduce on current CPython/urllib3: percent-encoded loopback addresses (`http://%67oogle.com`, percent-encoded `127.0.0.1`) do not cause urllib/requests to dispatch to localhost. Do not spray this payload — it burns stealth budget without producing primitives. For URL-encoded primitives that DO reproduce, load `open_redirect_advanced_deep.md § URL-Encoded Data Confusion Class`.
 
 ## Key Vulnerabilities
 
@@ -112,11 +134,14 @@ value you actually emit, not a re-parse of it.
 - Wildcards: `*.trusted.com` also matches `attacker.trusted.com.evil.net`
 - Missing scheme pinning: `data:`, `javascript:`, `file:`, `gopher:` accepted
 - Case/IDN drift between validator and browser
+- Unescaped regex metacharacters in registered URIs (the authentik CVE-2024-52289 class — mechanism in `open_redirect_novel_deep.md § authentik Redirect-URI Regex-Metacharacter Bypass`)
 
 **Robust Validation**
 - Canonicalize with a single modern URL parser (WHATWG URL)
 - Compare exact scheme, hostname (post-IDNA), and an explicit allowlist with optional exact path prefixes
 - Require absolute HTTPS; reject protocol-relative `//` and unknown schemes
+- Apply `re.escape` / `Pattern.quote` / `preg_quote` when compiling configuration strings to regex
+- RFC 9700 and OAuth 2.1 (2024-2025) now require strict string equality for `redirect_uri` — load the novel sibling for the verifier-side implications
 
 ### OAuth/OIDC/SAML
 
@@ -125,6 +150,7 @@ value you actually emit, not a re-parse of it.
 - Weak prefix/suffix checks: `https://trusted.com` → `https://trusted.com.evil.com`
 - Path traversal/canonicalization: `/oauth/../../@evil.com`
 - `post_logout_redirect_uri` often less strictly validated
+- Regex-metacharacter allowlist bypass (authentik class; see novel sibling)
 
 **Chaining an open redirect into code/token theft.** OAuth `redirect_uri`
 must be an *exact registered* value, so a standalone open redirect on the
@@ -153,6 +179,8 @@ browser's host, `attacker.tld`. Also test registration-time wildcards
 `post_logout_redirect_uri`, `RelayState`, and `state`-carried return URLs,
 which are routinely validated more weakly than `redirect_uri`.
 
+For the full OAuth redirect_uri chain depth including PAR, SAML RelayState, scheme/port mismatches, hybrid-flow response capture, and wildcarded subdomain exploitation, load `open_redirect_advanced_deep.md § OAuth redirect_uri Chain — Advanced Depth`. For 2024–2026 OAuth-provider-specific CVEs (authentik regex-metachar) and the RFC 9700 strict-matching transition, load `open_redirect_novel_deep.md § OAuth 2.1 / RFC 9700 Strict Redirect-URI Matching Shift`.
+
 ### Client-Side Vectors
 
 **JavaScript Redirects**
@@ -170,6 +198,8 @@ cross-origin `https:` value is open redirect:
 - framework routers that call the above from a query/hash param: React Router `navigate()`, Next.js `router.push()`/`redirect()`, Vue Router `router.push()`, Angular `Router.navigateByUrl()`
 - `<a href>` / `<form action>` / `<base href>` set from input
 - server-issued `Location` echoed from a client value
+- Service Worker fetch handlers routing to attacker URLs
+- `postMessage`-driven navigation without origin check
 
 Two client-only nuances the server-side matrix misses:
 - **Scheme not validated** — `location = params.get('next')` with `next=javascript:alert(1)` executes (self-XSS→redirect chain); allowlist the scheme, not just the host.
@@ -179,11 +209,20 @@ Two client-only nuances the server-side matrix misses:
 
 - Host/X-Forwarded-* may change absolute URL construction
 - CDNs that follow redirects for link checking can leak tokens when chained
+- `X-Original-URL` / `X-Rewrite-URL` on IIS and reverse proxies can shift the application's view of the request URL
+- Trusted-proxy IP lists (10.x, 192.168.x) that allow attacker-controlled headers from cloud-adjacent networks
 
 ### SSRF Chaining
 
 - Server-side fetchers (web previewers, link unfurlers) follow 3xx
 - Combine with an open redirect on an allowlisted domain to pivot to internal targets (169.254.169.254, localhost)
+- urllib3 `retries=False` does NOT disable redirects pre-2.5.0 (CVE-2025-50181 class — mechanism in `open_redirect_novel_deep.md § urllib3 CVE-2025-50181`)
+- URL-parser disagreement between validator and fetcher produces SSRF even when both are considered modern (vLLM CVE-2026-25960 class — case study in novel sibling)
+
+### Multi-Hop Validation
+
+- Validators that validate only the first hop in a redirect chain accept open-redirect-at-first-hop chains that reach arbitrary targets
+- Fetchers that re-validate every hop still expose parser-differential bugs at each hop
 
 ## Exploitation Scenarios
 
@@ -204,13 +243,21 @@ Two client-only nuances the server-side matrix misses:
 1. Server-side link unfurler fetches `https://trusted.example/out?u=http://169.254.169.254/latest/meta-data`
 2. Redirect follows to metadata; confirm via timing/headers
 
+### URL-Parser Disagreement SSRF
+
+1. Target uses one URL parser (e.g., `urllib`) for validator and another (e.g., `urllib3`) for fetcher
+2. Craft `http://127.0.0.1:<port>\@trusted.example.com/` — validator extracts `trusted.example.com` (passes), fetcher extracts `127.0.0.1`
+3. Measured confirmation: loopback dispatch returns 200 with the internal server's response (reproduced in `open_redirect_novel_deep.md § Measured 2026 URL-Parser Differentials`)
+
 ## Testing Methodology
 
-1. **Inventory surfaces** - Login/logout, password reset, SSO/OAuth flows, payment gateways, email links
-2. **Build test matrix** - Scheme × host × path variants and encoding/unicode forms
-3. **Compare behaviors** - Server-side validation vs browser navigation results
-4. **Multi-hop testing** - Trusted-domain → redirector → external
-5. **Prove impact** - Credential phishing, OAuth code interception, internal egress
+1. **Inventory surfaces** - Login/logout, password reset, SSO/OAuth flows, payment gateways, email links, webhook delivery, link preview endpoints
+2. **Fingerprint libraries** - Identify validator parser and fetcher parser separately; the pair-asymmetry is the attack surface
+3. **Build test matrix** - Scheme × host × path variants and encoding/unicode forms
+4. **Compare behaviors** - Server-side validation vs browser navigation results; validator parser vs fetcher parser
+5. **Multi-hop testing** - Trusted-domain → redirector → external; verify every hop or just the first
+6. **Prove impact** - Credential phishing, OAuth code interception, internal egress, SSRF to metadata
+7. **Confirm chain depth** - Does the fetcher follow redirects? How many hops? Does validation re-run?
 
 ## Validation
 
@@ -218,13 +265,20 @@ Two client-only nuances the server-side matrix misses:
 2. Show bypass of the stated validation (regex/allowlist) using canonicalization variants
 3. Test multi-hop: prove only first hop is validated and second hop escapes constraints
 4. For OAuth/SAML, demonstrate code/RelayState delivery to an attacker-controlled endpoint
+5. For SSRF-chained redirects, demonstrate dispatch to the internal target (loopback-return-200 is the strongest signal)
+6. Pair positive-URL (attacker URL) with negative-control (benign URL) — rejection of the negative control proves the validator is live
 
 ## False Positives
 
 - Redirects constrained to relative same-origin paths with robust normalization
-- Exact pre-registered OAuth redirect_uri with strict verifier
+- Exact pre-registered OAuth redirect_uri with strict verifier (RFC 9700-conformant)
 - Validators using a single canonical parser and comparing post-IDNA host and scheme
 - User prompts that show the exact final destination before navigating
+- Redirect inside an iframe (same-origin bounded, not top-level navigation)
+- Redirect to a known-safe third-party (Google login, documentation site)
+- Redirect requiring UI confirmation (bounded by user's choice)
+
+For the full advanced-tier false-positive discipline, load `open_redirect_advanced_deep.md § False Positives — Advanced`.
 
 ## Impact
 
@@ -232,6 +286,8 @@ Two client-only nuances the server-side matrix misses:
 - Internal data exposure when server fetchers follow redirects
 - Policy bypass where allowlists are enforced only on the first hop
 - Cross-application trust erosion and brand abuse
+- SSRF to cloud metadata services (EC2 IMDS, GCP metadata, Azure IMDS) when combined with fetcher redirect-follow
+- Model-storage leak and sibling-pod reach in LLM-API deployments (URL-parser-disagreement class)
 
 ## Pro Tips
 
@@ -242,7 +298,10 @@ Two client-only nuances the server-side matrix misses:
 5. For SSRF chaining, target services known to follow redirects
 6. Favor allowlists of exact origins plus optional path prefixes
 7. Use the verified per-language parser matrix above and fingerprint the target's actual stack rather than spraying blind; for the general validator-vs-consumer disagreement model this is an instance of, load `semantic_confusion`
+8. Fingerprint validator parser and fetcher parser separately — the pair-asymmetry is the attack surface for most real bugs
+9. For OAuth deployments, check RFC 9700 adoption — mid-transition deployments have policy disagreement attacks
+10. Do not spray URL-encoded loopback (`%67oogle.com`-style) — the primitive does not reproduce on current CPython + urllib3; it burns stealth budget
 
 ## Summary
 
-Redirection is safe only when the final destination is constrained after canonicalization. Enforce exact origins, verify per hop, and treat client-provided destinations as untrusted across every stack.
+Redirection is safe only when the final destination is constrained after canonicalization. Enforce exact origins, verify per hop, and treat client-provided destinations as untrusted across every stack. The 2024–2026 frontier concentrates on configuration-string-as-regex bugs (authentik), library-level redirect-control semantics (urllib3 2.5.0 fixes), and the enduring Claroty/Snyk parser-disagreement class — now with measured 2026 reproduction. Load the deep siblings for mechanism, measurement, and chain depth.

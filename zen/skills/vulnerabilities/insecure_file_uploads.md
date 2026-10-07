@@ -92,24 +92,21 @@ an inert file on another.
 
 ### Toolchain Exploits
 
-- **ImageMagick — ImageTragick (CVE-2016-3714)**: insufficient shell-metacharacter
-  filtering in the delegate coders (`MVG`, `MSL`, `HTTPS`, `EPHEMERAL`, `TEXT`,
-  `SHOW`, `WIN`, `PLT`) lets a crafted image run OS commands, read files
-  (`label:@/etc/passwd`), or SSRF (`https://` coder). Affects ImageMagick before
-  ~6.9.3-10 / 7.x before 7.0.1-1. Modern installs mitigate with `policy.xml`
-  (coder rights `none`), so test whether the deployed `policy.xml` actually
-  disables the risky coders before assuming it's patched — and try the vectors
-  regardless, since policies are often incomplete.
-- **Ghostscript — pipe command injection (CVE-2023-36664)**: Ghostscript
-  **through 10.01.2** mishandles permission validation for pipe devices, so a
-  crafted PS/EPS (or a PDF/image that GS renders) with a filename beginning
-  `%pipe%` or `|` executes an OS command on open (CVSS 9.8). Reached through any
-  upload pipeline that shells to GS (thumbnailers, PDF→image, ImageMagick's PS
-  delegate). Fingerprint the GS version (`gs --version`) and confirm it's ≤10.01.2.
-  Older lineage: `-dSAFER` sandbox-escape RCEs (e.g. CVE-2018-16509) — GS RCE has
-  recurred across releases, so version-match the specific bypass.
-- **ExifTool** metadata parsing bugs; overly large or crafted EXIF/IPTC/XMP
-  fields; the DjVu-annotation eval class historically reached RCE — version-match.
+The upload surface is only the delivery channel; the engine downstream is where
+RCE lives. The classes below name the primitive each engine class produces; the
+version-boundary and GHSA metadata live in `insecure_file_uploads_novel_deep.md`
+under the matching section.
+
+- **ImageMagick — ImageTragick (CVE-2016-3714)**: delegate-coder shell-metacharacter injection in the `MVG`, `MSL`, `HTTPS`, `EPHEMERAL`, `TEXT`, `SHOW`, `WIN`, `PLT` coders — crafted image → OS command, arbitrary file read via `label:@/etc/passwd`, or SSRF via `https://`. Modern installs mitigate via `policy.xml` with `coder rights="none"`, so always inspect the deployed policy before assuming the class is closed. See `insecure_file_uploads_novel_deep.md § ImageMagick Delegate-Coder Injection — Version Boundary`.
+- **Ghostscript — pipe command injection (CVE-2023-36664)**: pipe-device permission validation flaw — PS/EPS/PDF with filename beginning `%pipe%` or `|` → OS command execution on open. Reached through any upload pipeline that shells to GS (thumbnailers, PDF-to-image, ImageMagick's PS delegate). See `insecure_file_uploads_novel_deep.md § Ghostscript Pipe-Device Command Injection`.
+- **Ghostscript — uniprint format-string → -dSAFER sandbox escape (CVE-2024-29510)**: attacker-controlled `upYMoveCommand` / `upWriteComponentCommands` strings reach `gs_snprintf` / `gp_fprintf` without specifier sanitization, producing `%s`/`%x` arbitrary-read and `%n` arbitrary-write primitives; a specific pointer-dereference chain flips `path_control_active` to zero, re-enabling the `%pipe%` operator for command execution. Upload-reachable in-the-wild via ImageMagick's PS delegate with EPS-disguised-as-JPG polyglots. See `insecure_file_uploads_novel_deep.md § Ghostscript uniprint Format-String Sandbox Escape`.
+- **Ghostscript — -dSAFER restoration-of-privilege class (CVE-2018-16509 and successors)**: legacy sandbox-escape pattern — permission state restored after a privileged op completes without re-validating the newly accessible resource. GS RCE has recurred across releases, so version-match the specific bypass; see `insecure_file_uploads_novel_deep.md § Ghostscript -dSAFER Historical Catalog`.
+- **ExifTool** metadata parsing bugs — overly large or crafted EXIF/IPTC/XMP fields reach eval sinks in the DjVu-annotation class, which historically reached RCE; see `insecure_file_uploads_novel_deep.md § ExifTool DjVu Eval Historical Class`.
+
+Separate from engine-class RCE, two upload-primitive classes drive straight to webroot write without a conversion engine in the loop:
+
+- **Apache Struts — multipart mass-assignment to webroot path (CVE-2024-53677, S2-067)**: a multipart POST includes a legitimate `file` field plus a crafted `top.fileFileName` parameter containing path-traversal sequences, which the ParametersInterceptor assigns onto the action class's field via OGNL value-stack access, writing (e.g.) a JSP shell to `../usr/local/tomcat/webapps/ROOT/shell.jsp`. Primitive-only; no undocumented-keyword or version-range claims. See `insecure_file_uploads_novel_deep.md § Struts top.fileFileName Mass-Assignment Primitive`.
+- **SharePoint — ToolShell unauth file-drop (CVE-2025-53770, "ToolShell")**: single unauthenticated POST to `/_layouts/15/ToolPane.aspx?DisplayMode=Edit` with a spoofed `Referer: /_layouts/15/signout.aspx` writes an `.aspx` file to the SharePoint webroot (observed artifact: `spinstall0.aspx`). The *delivery/activation* primitive is the file-upload class; the full-RCE chain requires the dropped shell to leak the ASP.NET MachineKey and forge `__VIEWSTATE` via `ysoserial.net`, which routes to `insecure_deserialization.md`. See `insecure_file_uploads_novel_deep.md § SharePoint ToolShell Delivery Primitive`.
 
 ### SVG → XXE
 
@@ -139,17 +136,21 @@ filter-chain generator and the File-Write-to-Execution resolver analysis.
 
 ### Cloud Storage Vectors
 
-- S3/GCS presigned uploads: attacker controls Content-Type/Disposition; set text/html or image/svg+xml and inline rendering
-- Public-read ACL or permissive bucket policies expose uploads broadly
-- Object key injection via user-controlled path prefixes
-- Signed URL reuse and stale URLs; serving directly from bucket without attachment + nosniff headers
+- S3/GCS presigned uploads: attacker controls `Content-Type`/`Content-Disposition`; set `text/html` or `image/svg+xml` and inline rendering follows if the server does not constrain the signed fields. The signing-time policy is the gate — a POST policy with no `conditions` clause on `Content-Type` or an unconstrained prefix on `key` lets the attacker upload HTML under a path the app later serves inline.
+- Signed-URL replay: a presigned URL re-used after the uploaded blob was overwritten (e.g. the attacker races to update the object between signing and consuming) delivers attacker content under a URL the app has already committed to in its database. Confirm by checking whether presigned URLs are issued once per transaction or recycled across sessions.
+- Signed-field tampering with S3 POST policy: `signature` + `policy` cover `conditions`, but the attacker-provided *additional* fields (not listed in the policy's `conditions`) are accepted by S3 anyway. If the server-side policy omits `starts-with` on `$Content-Type`, the attacker sets any Content-Type; if it omits a condition on `$key`, the attacker writes to arbitrary paths within the bucket.
+- Public-read ACL or permissive bucket policies expose uploads broadly; combined with no `X-Content-Type-Options: nosniff` and inline Content-Disposition, this is stored XSS with the bucket's domain as the origin.
+- Object key injection via user-controlled path prefixes: a sign request where the client supplies `key=user-123/avatar.jpg` and the server fails to constrain the prefix lets the attacker write `key=admin/htaccess` or `key=public/shell.jsp` to a path the app serves executably.
+- Pre-signed GET replay for exfiltration: a signed GET URL for a different user's object leaks when key enumeration is predictable; route to `idor.md` for the authorization-side analysis.
 
 ## Advanced Techniques
 
 ### Resumable Multipart
 
-- Change metadata between init and complete (e.g., swap Content-Type/Disposition at finalize)
-- Upload benign chunks, then swap last chunk or complete with different source
+- Change metadata between init and complete (e.g., swap Content-Type/Disposition at finalize) — many servers validate on init but trust client-supplied metadata on complete
+- Upload benign chunks, then swap last chunk or complete with different source — content-type sniffing commonly reads only the first chunk, so a benign JPEG header followed by a late malicious chunk defeats early scanners
+- S3 multipart upload (MPU) composition: `CompleteMultipartUpload` concatenates parts without re-scanning; parts can be uploaded from different sources with independently valid magic-byte headers (polyglot assembly at the storage layer)
+- tus protocol `Upload-Offset` and `Upload-Length` header manipulation: a resumable upload that validates total length against policy at init but accepts a different final length on `PATCH` with the `Upload-Concat` extension can smuggle larger files than the policy allows
 
 ### Filename and Path
 
