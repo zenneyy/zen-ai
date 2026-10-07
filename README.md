@@ -97,20 +97,6 @@ zen --target ./app-directory
 
 ---
 
-## ☁️ Managed platform
-
-**[app.zenney.uk](https://app.zenney.uk)** hosts the same engine as a managed service. Register an account, attach your repositories and domains, and assessments dispatch without any local infrastructure.
-
-- **Validated findings with PoCs** — a reproducible exploit and its reproduction sequence accompany every reported vulnerability
-- **One-click autofix** — model-generated security patches delivered as reviewable pull requests
-- **Continuous pentesting** — assessment on a persistent schedule, tracking your deployment velocity
-- **DevSecOps integrations** — GitHub, GitLab, Bitbucket, Slack, Jira, Linear, and CI/CD pipelines
-- **Continuous learning** — prior findings inform subsequent runs; the system adapts to your codebase and suppresses recurring false positives
-
-[**Run your first assessment →**](https://app.zenney.uk)
-
----
-
 ## ✨ Architecture
 
 ### Agent tooling
