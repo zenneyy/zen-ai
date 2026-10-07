@@ -355,10 +355,6 @@ Tool identifiers are namespaced under the server's `name` — `local_fs_read_fil
 
 Locally hosted models are supported through the `LLM_API_BASE` override; the [LLM Providers documentation](https://docs.zenney.uk/llm-providers/overview) enumerates every configuration option.
 
-## Enterprise
-
-The same engine under organizational controls: [enterprise-grade](https://zenney.uk/demo) SSO via SAML or OIDC, custom penetration testing reports mapped to SOC 2, ISO 27001, and PCI DSS, dedicated support under SLA, flexible deployment topologies including VPC and self-hosted, BYOK model access, and agents tuned against your environment. [Learn more](https://zenney.uk/demo).
-
 ## Reference documentation
 
 The complete reference lives at **[docs.zenney.uk](https://docs.zenney.uk)**, covering usage, CI/CD integration, skills, and advanced configuration.
