@@ -76,7 +76,7 @@ or the impact spans all tenants rather than one.
 
 ## Mapping to Program Priority (Bugcrowd VRT)
 
-Many programs — Bugcrowd-run VDPs and the NASA VDP this agent operates
+Many programs — Bugcrowd-run VDPs and VDP this agent operates
 under included — triage on the Vulnerability Rating Taxonomy's P1–P5
 priority scale, not on a raw CVSS number. The VRT gives a *baseline* per
 vulnerability class; the program brief, application context, and

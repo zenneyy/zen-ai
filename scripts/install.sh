@@ -4,7 +4,7 @@ set -euo pipefail
 
 APP=zen
 REPO="zenneyy/zen-ai"
-ZEN_IMAGE="ghcr.io/zenneyy/zen-sandbox:1.2.0"
+ZEN_IMAGE="ghcr.io/zenneyy/zen-sandbox:1.2.2"
 
 MUTED='\033[0;2m'
 RED='\033[0;31m'

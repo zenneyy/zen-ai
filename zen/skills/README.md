@@ -36,18 +36,21 @@ The skills are dynamically injected into the agent's system prompt, allowing it 
 | **`/tooling`** | Command-line playbooks for core sandbox tools (nmap, nuclei, httpx, ffuf, subfinder, naabu, katana, sqlmap) |
 | **`/cloud`** | Cloud provider security testing for AWS, Azure, GCP, and Kubernetes environments |
 | **`/reconnaissance`** | Advanced information gathering and enumeration techniques for comprehensive attack surface mapping |
+| **`/chaining`** | The canonical attack-graph model — chain construction, primitive taxonomy (grant/require pairs), chain validation, and chain severity scoring |
+| **`/validation`** | Red-team-your-own-finding methodology — per-class falsification, blind revalidation, cross-class FP taxonomy, and negative control design |
+| **`/supply_chain`** | Operational supply-chain hygiene — dependency CVE scanning, npx/registry confusion testing, and infrastructure lifecycle trust analysis |
 | **`/custom`** | Community-contributed skills for specialized or industry-specific testing scenarios |
 
 Notable source-aware skills:
 - `source_aware_whitebox` (coordination): white-box orchestration playbook
 - `source_aware_sast` (custom): semgrep/AST/secrets/supply-chain static triage workflow
-- `dependency_cve_scanning` (custom): trivy-based SCA workflow for reporting known dependency CVEs via `create_dependency_report`
-- `npx_confusion` (custom): npx/npm exec/bunx fallback and adjacent package-runner identity confusion, with runner-specific registry and reporting gates
+- `dependency_cve_scanning` (supply_chain): trivy-based SCA workflow for reporting known dependency CVEs via `create_dependency_report`
+- `npx_confusion` (supply_chain): npx/npm exec/bunx fallback and adjacent package-runner identity confusion, with runner-specific registry and reporting gates
 - `semantic_confusion` (vulnerabilities): cross-boundary parser, normalization, and representation mismatch analysis
 - `agentic_system_security` (vulnerabilities): effective-authority and MCP/tool ecosystem security testing
 - `browser_security` (vulnerabilities): browsing-context, postMessage, XS-Leaks, service-worker, and cross-origin state-machine testing
 - `azure` (cloud): Azure and Microsoft Entra privilege, PIM, workload identity, and cross-plane escalation analysis
-- `infrastructure_lifecycle` (reconnaissance): abandoned or mutable external dependencies such as update endpoints, MX, storage, and control domains
+- `infrastructure_lifecycle` (supply_chain): abandoned or mutable external dependencies such as update endpoints, MX, storage, and control domains
 - `argument_injection` (vulnerabilities): shell-free CLI option smuggling, secondary argument-file parsing, and platform-specific argv transformation boundaries
 - `electron_desktop_apps` (technologies): Electron renderer-to-native trust boundaries, preload/IPC exposure, and navigation analysis
 

@@ -158,6 +158,11 @@ Individual bugs are starting points. Chain them for maximum impact:
 - Validate chains by executing the full sequence (proxy + browser for workflows, python for automation)
 - When a pivot is found, spawn focused agents to continue the chain in the next component
 
+Load `chain_construction`; it cross-references `primitive_taxonomy`,
+`chain_validation`, and `chain_severity` — pull those as the chain
+demands. These own the chain methodology; the bullets above are the
+deep-mode mandate for when to use it.
+
 ## Phase 5: Persistent Testing
 
 When initial attempts fail:
@@ -170,7 +175,24 @@ When initial attempts fail:
 - Consider timing-based and blind exploitation
 - Look for logic flaws that require deep application understanding
 
-## Phase 6: Comprehensive Reporting
+## Phase 6: Finding Validation
+
+Before every report, challenge your own finding — in deep mode the bar is strict:
+
+- Load `red_team_the_finding`; it routes to `fp_taxonomy`,
+  `negative_control_design`, and `blind_revalidation` — pull those as
+  the finding demands.
+- Negative control is required in deep mode: a finding without a
+  baseline request that must NOT trigger is unconfirmed.
+- Re-validation under a fresh session is required for high-impact
+  findings, especially state-dependent exploits (race conditions, auth,
+  session fixation).
+
+The counterevidence pass (always-inlined `analysis/counterevidence`)
+stays in force; this phase adds the deep-mode-specific validation
+discipline on top.
+
+## Phase 7: Comprehensive Reporting
 
 - Document every confirmed vulnerability with full details
 - Include all severity levels—low findings may enable chains

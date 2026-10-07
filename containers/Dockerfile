@@ -17,7 +17,12 @@ RUN mkdir -p /out/bin && \
     go install -v github.com/projectdiscovery/cvemap/cmd/vulnx@latest && \
     go install -v github.com/jaeles-project/gospider@latest && \
     go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest && \
-    go install -v golang.org/x/vuln/cmd/govulncheck@latest
+    go install -v golang.org/x/vuln/cmd/govulncheck@latest && \
+    go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest && \
+    go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest && \
+    go install -v github.com/tomnomnom/waybackurls@latest && \
+    go install -v github.com/lc/gau/v2/cmd/gau@latest && \
+    go install -v github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
 
 # ---------------------------------------------------------------------------
 # Runtime stage
@@ -195,6 +200,7 @@ RUN set -eux; \
 RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
 RUN apt-get install -y wapiti
+RUN apt-get install -y feroxbuster
 
 USER pentester
 

@@ -110,7 +110,7 @@ class RuntimeSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
     image: str = Field(
-        default="ghcr.io/zenneyy/zen-sandbox:1.2.0",
+        default="ghcr.io/zenneyy/zen-sandbox:1.2.2",
         alias="ZEN_IMAGE",
     )
     backend: str = Field(default="docker", alias="ZEN_RUNTIME_BACKEND")
