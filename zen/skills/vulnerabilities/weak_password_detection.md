@@ -73,11 +73,14 @@ ffuf -w users.txt:USER -u https://target/login -X POST \
 
 ### Weak Password Policies
 
-- No minimum length or complexity requirements
+Per NIST SP 800-63B-4 (July 2025, current edition), the minimum password length is 15 characters, composition rules are deprecated, breached-password checking is mandatory, and forced rotation is deprecated. See `weak_password_detection_novel_deep.md § NIST SP 800-63B-4` for the full assessment guidance.
+
+- Minimum length below 15 characters (NIST SP 800-63B-4 floor; was 8 under SP 800-63B-3)
 - Allowing common passwords: `password`, `123456`, `qwerty`, `admin`, `letmein`
-- Not checking against breached password databases (Have I Been Pwned)
+- Not checking against breached password databases (Have I Been Pwned) — a SHALL requirement under SP 800-63B-4
 - Case-insensitive password storage
-- No password history enforcement
+- Composition rules enforced (deprecated by SP 800-63B-4 — reduces effective entropy)
+- Forced periodic rotation without evidence of compromise (deprecated by SP 800-63B-4)
 - Excessively short maximum length (indicates plaintext or weak hashing)
 
 ### Default and Hardcoded Credentials
@@ -131,7 +134,12 @@ truncation surface:
   or `pepper+password`), a long left field can push the real password past the
   72-byte boundary so it is ignored — an authentication-bypass class in
   delegated-auth/LDAP designs. Probe by registering a >72-byte password and
-  logging in with the same first 72 bytes plus a different tail.
+  logging in with the same first 72 bytes plus a different tail. The library-
+  side behavior shifted mid-2025: pre-5.0.0 pyca/bcrypt silently truncated;
+  5.0.0+ raises `ValueError` in both `hashpw()` and `checkpw()`. See
+  `weak_password_detection_novel_deep.md § bcrypt Pre-5.0.0 Silent Truncation`
+  for the measured version boundary and the full exploitation chain for
+  deployments pinned at pre-5.0.0.
 
 ## Advanced Techniques
 
@@ -228,6 +236,15 @@ window** — never many passwords against one user.
 - For on-prem AD/Kerberos/SMB spraying (`kerbrute passwordspray`, NTLM over
   SMB), load `active_directory` — that is a different lockout and enumeration
   model.
+- **Okta Classic app-sign-on-policy bypass (2024-07-17 → 2024-10-04, no CVE
+  assigned)** — a valid-credential-holding attacker with a user-agent Okta
+  evaluated as "unknown device type" (Python scripts, uncommon browsers) could
+  bypass per-app sign-on policies (network zones, device-type restrictions,
+  MFA factors) that layered atop the Global Session Policy. Converts a
+  password-spray survivor into a per-app MFA / network / device bypass. See
+  `weak_password_detection_novel_deep.md § Okta Classic App-Sign-On-Policy
+  Bypass` for the primitive detail and the user-agent fingerprint that
+  triggered the bypass.
 
 ### OTP and Reset-Token Attacks
 
@@ -362,7 +379,7 @@ No password wordlists ship in the sandbox by default — download what you need 
 5. Test for password spraying (one password, many users) before targeted brute-force
 6. Check for concurrent session limits; successful logins may kick out legitimate users
 7. GraphQL batching can test multiple credentials in a single request, bypassing per-request limits
-8. Document the password policy and recommend minimum standards (length, complexity, breach checking)
+8. Document the password policy against NIST SP 800-63B-4 (2025): minimum 15 chars, no composition rules, breached-password blocklist, no forced rotation
 9. For web logins prefer `ffuf`; for other services use `nmap` NSE `*-brute` scripts or custom scripts with equivalent logic
 10. Combine with MFA testing: weak passwords plus missing MFA is a critical finding
 
