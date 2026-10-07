@@ -339,3 +339,7 @@ hallucinate a CVE id.
   `contextual_cvss_reasoning` — the reader rates and ranks the finding with them.
 - Do not use the contextual breakdown to quietly de-rate a CVE you could not
   analyze. State the limit of the analysis in the reasoning instead.
+
+## Boundary
+
+This skill owns **operational SCA** — scanning lockfiles for known CVEs and reporting them. The attack surface where an adversary introduces malicious code through the supply chain (dependency confusion, typosquatting, maintainer compromise, postinstall hooks, registry tampering) lives in `supply_chain_ci_integrity`. Load that skill when the finding is an attacker-controlled package, not a known-vulnerable one.

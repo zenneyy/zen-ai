@@ -224,3 +224,7 @@ Include:
 ## Summary
 
 External names are long-lived security dependencies. Track every consumer to its current controller, prove that deployed software still trusts the endpoint, analyze the authenticity checks and processing privilege, and manage ownership for as long as any supported or abandoned client can call home.
+
+## Boundary
+
+This skill owns **infrastructure ownership drift** — abandoned or expired external dependencies that deployed consumers still trust. Active supply-chain attacks through the build pipeline (dependency confusion, CI injection, signing bypass, registry tampering) live in `supply_chain_ci_integrity`. Load `dependency_cve_scanning` for known CVEs in resolved dependencies.

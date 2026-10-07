@@ -231,3 +231,7 @@ Deduplicate by root cause, affected asset/workflow, and remediation. Combine cal
 ## Summary
 
 Treat package-runner confusion as an identity and execution-context bug. Prove the runner-specific transition, distinguish binary names from package names, verify registry and publisher state without equating absence with eligibility, and report only a complete execution path under the affected workflow's actual authority.
+
+## Boundary
+
+This skill owns **package-runner identity confusion** — the mismatch between intended and resolved executable in npx/bunx/dlx/deno. Broader supply-chain attack surface (dependency confusion, typosquatting, maintainer compromise, CI injection) lives in `supply_chain_ci_integrity`. Load `dependency_cve_scanning` when the finding is a known CVE in a resolved package, not a resolution-identity mismatch.
