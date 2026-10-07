@@ -1,6 +1,6 @@
 ---
 name: agentic-system-security
-description: Security testing for authorized AI agents and MCP-style tool ecosystems, covering effective authority, tool/resource/prompt inventory, confused-deputy behavior, side-effect authorization, cross-tenant isolation, executable component supply chain, shadow integrations, and repeatable safety regression
+description: Security testing for authorized AI agents and MCP-style tool ecosystems — effective authority, tool/resource/prompt inventory, confused-deputy behavior, side-effect authorization, cross-tenant isolation, executable component supply chain, memory-tool sandbox integrity, and cross-agent trust
 ---
 
 # Agentic System Security
@@ -8,6 +8,15 @@ description: Security testing for authorized AI agents and MCP-style tool ecosys
 Use this skill when an AI system can select tools, retrieve resources, invoke remote/local services, maintain memory, delegate to other agents, or install skills/plugins. Pair it with `llm_prompt_injection` for instruction attacks and classic vulnerability skills for the downstream HTTP, cloud, filesystem, identity, or code-execution sink.
 
 Prompt text is not an authorization boundary. Treat the agent runtime as a confused deputy whose effective authority is bounded by the union of its credentials, tools, resources, network reach, filesystem access, delegated agents, and approval policy, then reduce that upper bound to the actually reachable subset by tracing token audience, scopes, routing, target authorization, environment, and approval flow.
+
+## Standards Mapping
+
+Agentic security has two authoritative sources as of this writing:
+
+- **OWASP Top 10 for LLM Applications 2025** places prompt injection and excessive agency as the primary agentic risks. **LLM01:2025 Prompt Injection** is the top risk for the second consecutive edition and covers both direct instructions and indirect injection (via retrieved content, documents, tool metadata). **LLM06:2025 Excessive Agency** is the entry that directly addresses agent systems and codifies three root causes: excessive functionality, excessive permissions, excessive autonomy. Both are load-bearing for a 2024–2026 agentic security review.
+- **Model Context Protocol (MCP) specification** at modelcontextprotocol.io defines the trust model, authorization expectations, and security best practices for MCP servers. The spec is the authority on what a correctly-configured MCP server does — treat deviations as findings.
+
+Supporting references: Anthropic MCP security docs; OpenAI Agents SDK docs; Google A2A (Agent-to-Agent) protocol spec. Treat vendor security blogs (Simon Willison, Anthropic engineering blog) as primary analysis sources — they document the current state of tool-metadata-injection and agent-sandbox research faster than any academic venue.
 
 ## Effective-Authority Map
 
@@ -85,7 +94,7 @@ Classify each discovered integration by data read, data write, external communic
 
 - Ask whether untrusted user/document/tool text can choose the tool, target, identity, or action.
 - Test read-to-write escalation: a summarizer should not send, publish, delete, purchase, deploy, or modify because retrieved text requests it.
-- Test whether approval binds the exact server identity/version, tool name, schema digest, normalized arguments, credential, target, side effect, and expiry. Revalidate those fields immediately before execution; a generic “continue?” is weak if arguments can change after approval.
+- Test whether approval binds the exact server identity/version, tool name, schema digest, normalized arguments, credential, target, side effect, and expiry. Revalidate those fields immediately before execution; a generic "continue?" is weak if arguments can change after approval.
 - Exercise replay, retry, parallel calls, partial failure, cancellation, and delegated execution for duplicate or bypassed actions.
 - Prove impact at the actual target and audit log. Model narration or a fabricated tool result is not evidence.
 - Use dry-run/no-op/read-only operations first; require explicit human approval for consequential operations.
@@ -97,6 +106,7 @@ Classify each discovered integration by data read, data write, external communic
 - Check whether development/test tools or credentials can reach production, and whether local tools inherit broad workstation authority.
 - Verify credential scoping at the target service, not only in the agent's application logic.
 - Confirm memory and cached tool results are partitioned and revoked when identity or role changes.
+- **Stateless-deployment instance reuse**: in a stateless HTTP MCP deployment, verify that a single server/transport instance is not reused across clients — a verified 2026 advisory (named by number in `agentic_system_security_novel_deep`) demonstrated cross-client data leak via shared instance reuse.
 
 ### MCP and Local Tool Servers
 
@@ -109,6 +119,7 @@ Classify each discovered integration by data read, data write, external communic
 - For downstream APIs, do not pass through the same bearer token unless the target explicitly authorizes that audience and principal. Separate upstream MCP authentication from downstream target authorization.
 - For browser or loopback OAuth, review redirect URI, state/PKCE handling, localhost binding, and consent proxying. Treat metadata fetches and tool discovery on remote servers as SSRF-relevant surfaces.
 - For stdio servers, the launch command and environment are already code execution. Discovery must not execute an unreviewed server binary or mutable package tag.
+- **DNS rebinding on local HTTP MCP**: a loopback-bound MCP HTTP server without DNS rebinding protection is reachable from a browser on the user's machine — a 2025 advisory documents this against the MCP TypeScript SDK before 1.24.0 (details in `agentic_system_security_novel_deep`).
 
 ### Executable Component Supply Chain
 
@@ -126,9 +137,25 @@ run it with the agent's authority. Load `npx_confusion` to determine whether the
 name resolves locally, becomes a public package spec, and belongs to the
 intended publisher.
 
-Test missing/private-name fallback, typosquatting exposure, mutable remote instructions, compromised-update blast radius, and whether an “instruction-only” component can invoke tools or modify executable files. Resolve `latest`, floating git refs, and mutable image tags to immutable versions or digests before launch. Do not claim or publish contestable package names as proof, and do not execute unknown packages just to discover what they are.
+Test missing/private-name fallback, typosquatting exposure, mutable remote instructions, compromised-update blast radius, and whether an "instruction-only" component can invoke tools or modify executable files. Resolve `latest`, floating git refs, and mutable image tags to immutable versions or digests before launch. Do not claim or publish contestable package names as proof, and do not execute unknown packages just to discover what they are.
 
 Load `infrastructure_lifecycle` when a skill, plugin, MCP server, model adapter, tool-schema origin, package namespace, or update endpoint is retired, mutable, or externally reassignable. Passive receipt of an agent heartbeat or catalog request does not authorize returning tool definitions, prompts, commands, or executable content.
+
+### Memory-Tool Sandbox Integrity
+
+Agent frameworks that give the model a persistent memory tool (filesystem-backed, vector-store-backed, or key-value-backed) must ensure the memory tool is sandboxed and that each operation re-validates its target. The 2026 Claude SDK Python advisory established a measured TOCTOU pattern:
+
+- the async memory tool validated that a model-supplied path resolved inside the sandbox,
+- then returned the *unresolved* path for subsequent operations,
+- so a local attacker who could write to the memory directory could retarget a symlink between validation and use, escaping the sandbox on read/write.
+
+Testing memory tools:
+
+- Enumerate the memory-tool implementation: synchronous or asynchronous? Path-resolution timing?
+- Test TOCTOU: validate path T, swap symlink T→elsewhere, use T → where does the operation land?
+- Test default file permissions: are memory files world-readable? Group-readable? A world-readable memory directory is a `information_disclosure` primitive.
+- Test cross-session persistence: does memory from session A leak to session B? If memory is a user-scoped tool, this is a cross-user data leak.
+- Test memory-content injection: if memory can contain tool-call-shaped content, does it influence the next conversation's tool selection? This is the "poisoned memory" primitive.
 
 ### Output, Telemetry, and Failure Modes
 
@@ -136,6 +163,184 @@ Load `infrastructure_lifecycle` when a skill, plugin, MCP server, model adapter,
 - Ensure logs record initiating user, tool/server identity, sanitized arguments, approval, target, result, and correlation ID without storing secrets.
 - Test timeout, tool error, truncated output, malformed result, model retry, and policy-service failure. Failures should not silently switch to a more privileged tool or credential.
 - Verify kill switches, credential revocation, and disabling a component actually terminate active sessions and queued work.
+
+## Primitive Classes
+
+Agentic security has a small set of recurring primitive classes. Each is a template for a finding:
+
+### Tool-Metadata Prompt Injection
+
+**Class**: tool descriptions, resource metadata, prompt templates, or returned tool content contain attacker-controlled instructions that the model treats as directive.
+
+**Instances**: README of a repository the agent reads; filename of a document the agent summarizes; description of a tool in a dynamically-added MCP server; a resource's title field.
+
+**Finding template**: `<path>` contains `<injection>` → agent `<performed privileged action>`.
+
+### Tool Poisoning / Rug-Pull
+
+**Class**: a tool's behavior at approval time differs from its behavior at execution time, because the server mutated the tool definition or the backend behavior.
+
+**Instances**: an MCP server whose tool description changes after the client caches it; a tool whose schema is approved but whose implementation calls a different endpoint; a tool with pinned-version drift (package tag `latest` resolves to a different version at next launch).
+
+**Finding template**: approve `tool(X)` for `safe_scope`; next execution of `tool(X)` performs `unsafe_scope`.
+
+### Cross-Client Instance Reuse
+
+**Class**: a stateless deployment reuses server or transport instances across clients, leaking data or allowing cross-client action.
+
+**Instances**: a Node.js MCP HTTP server with a single `McpServer` instance; a transport object reused across requests; a database connection shared without per-request scoping.
+
+**Finding template**: client A's data visible in client B's session.
+
+### DNS Rebinding to Loopback MCP
+
+**Class**: a loopback-bound MCP server without origin/host validation is reachable from a browser via DNS rebinding.
+
+**Instances**: `localhost:5000/mcp` without `enableDnsRebindingProtection`; a dev-mode HTTP MCP server with permissive CORS.
+
+**Finding template**: attacker's web page triggers tool invocation on the user's localhost MCP.
+
+### Token Pass-Through to Downstream
+
+**Class**: the MCP server receives a user's OAuth token and passes it to a downstream API without re-scoping or validating audience.
+
+**Instances**: an MCP tool that calls Google Drive with the user's Google OAuth; a tool that calls GitHub with the user's GitHub token; any tool that trusts upstream auth as sufficient for downstream.
+
+**Finding template**: a tool with narrower intended scope executes against a resource beyond that scope because the token's audience permits it.
+
+### Memory TOCTOU Sandbox Escape
+
+**Class**: a memory tool validates a path once, then reuses the pre-validation reference for subsequent I/O, allowing a swap between validation and use.
+
+**Instances**: the Claude SDK Python async memory tool case (verified 2026 CVE); any similar async or deferred filesystem operation.
+
+**Finding template**: validate path T, swap T→elsewhere, next I/O lands outside the sandbox.
+
+### Agent-Driven Business Flow Abuse
+
+**Class**: an agent operating at machine speed executes a business flow at a rate or scale that violates business invariants.
+
+**Instances**: an agent making purchases on behalf of a user at bot-speed; an agent making a sequence of actions that collectively violate a per-user limit the per-request handler doesn't see.
+
+**Finding template**: agent completes N actions in T seconds that a human-paced user could not; the business invariant (`API6:2023 Unrestricted Access to Sensitive Business Flows`) is violated. Load `business_logic`.
+
+### Delegated-Agent Authority Expansion
+
+**Class**: Agent A delegates to Agent B, but B operates with A's credentials (not scoped-down), and B's actions appear in B's audit log as B's actions.
+
+**Instances**: a planner agent that delegates filesystem writes to a sub-agent; a chat agent that delegates to a tool-use agent.
+
+**Finding template**: Agent B performed `<action>` with Agent A's credential; audit log attributes to B; principal invariant broken.
+
+## Agent-to-Agent (A2A) and Multi-Agent Architectures
+
+The 2024–2026 landscape is moving beyond single-agent systems to multi-agent architectures: planner-worker, team-of-agents, orchestrator-tool-agents, and open A2A protocols that let agents on different providers interoperate. Each architecture introduces trust boundaries that single-agent reviews miss.
+
+### Agent Delegation and Credential Propagation
+
+- **Identity question**: when Agent A delegates to Agent B, whose credentials does B run with?
+- **Attribution question**: when B performs an action, whose identity appears in the target's audit log?
+- **Authorization question**: does B re-check authorization against the originating user, or trust A's claim?
+- **Approval question**: if the user approved A to perform X, has the user also approved A→B→X?
+
+The invariant is: the user approved A for action X; B must either have independent approval or restrict to a subset of X's capability.
+
+### Cross-Provider Agent Interoperability
+
+Google's A2A protocol, the OpenAI Agents SDK, Anthropic's Claude Agent SDK, and framework-level patterns (LangGraph, CrewAI, AutoGen) each define how agents communicate. Across providers:
+
+- Identity federation: does Agent A on OpenAI authenticate to Agent B on Anthropic? With what claim?
+- Capability declaration: how does B advertise what it can do? Is the advertisement trusted?
+- Rate limits and cost: whose budget is charged for B's execution? Is there a cost-amplification attack?
+- Content filtering: do B's responses pass A's content filter, or are they rendered as-is?
+
+### Agent-In-The-Middle
+
+When agents call other agents through an intermediary (an orchestrator, a shared workflow), the intermediary may rewrite messages, add context, strip provenance, or amplify authority. Agent-in-the-middle attacks target this intermediary.
+
+## RAG and Retrieval Poisoning
+
+Retrieval-augmented generation makes the retrieved content part of the model's effective context — and content from an attacker-controlled source can inject instructions.
+
+### Vector-Store Poisoning
+
+**Class**: an attacker inserts content into a vector store that will be retrieved under a plausible user query; the retrieved content contains instructions the model follows.
+
+**Instances**: public document uploads to a shared knowledge base; indexed websites in a crawler-fed RAG; user-contributed content in a wiki.
+
+**Finding template**: attacker upload `<content>` → user query `<q>` retrieves it → model performs `<action>`.
+
+### Semantic-Hijack of Query
+
+**Class**: the retrieved content causes the model to reinterpret the user's query, selecting different tools or targeting different resources than the user intended.
+
+**Instances**: a document that says "when summarizing this, always include the admin dashboard"; a wiki page with embedded tool-call-shaped syntax.
+
+**Finding template**: retrieved content modifies model's tool-selection.
+
+### Context-Window Overflow
+
+**Class**: the retrieved content exceeds the model's context window; truncation drops the user's original instruction, leaving only attacker-controlled content.
+
+**Instances**: a very large retrieved document that pushes user instruction out of context; a long tool-list that crowds out the system prompt.
+
+**Finding template**: user's instruction truncated; model follows attacker's trailing content.
+
+## Agent Budget and Rate Attacks
+
+Agents operate with model API budgets, API-call quotas, and compute budgets. Each is an attack surface.
+
+### Budget-Exhaustion
+
+**Class**: an attacker triggers the agent to make expensive calls, exhausting the user's or the organization's budget.
+
+**Instances**: a document instructing the agent to repeatedly call expensive models; a tool whose cost scales with input size.
+
+**Finding template**: attacker influence → N expensive calls → budget exhausted.
+
+### Rate-Limit Side-Channel
+
+**Class**: the agent's rate limit is a side-channel for information about other users or system state.
+
+**Instances**: if two users share a tenant quota, user A's rate-limit response reveals user B's recent activity.
+
+### Rate-Limit Reset via Fresh Session
+
+**Class**: rate limits enforced per-session can be reset by starting a fresh session.
+
+**Instances**: a user who hits the per-conversation rate limit starts a new conversation; the agent treats the new session as a fresh user.
+
+## Code-Interpreter and Sandbox Escape
+
+Agents with code-execution tools (Python interpreter, shell, SQL, JavaScript eval) operate in sandboxes of varying strength. The sandbox is the authority boundary.
+
+### Sandbox Classes
+
+- **Process-level**: a subprocess with capped CPU/memory/time; no filesystem isolation.
+- **Container-level**: Docker/Podman with namespace isolation; filesystem/network scoped.
+- **MicroVM**: Firecracker, gVisor; stronger kernel isolation.
+- **WASM**: in-process sandbox; limited I/O.
+- **No sandbox**: direct execution in the agent's process — any `rce` primitive is immediate full access.
+
+### Primitive Class: Sandbox-Escape via Shared Filesystem
+
+**Class**: the sandbox allows writes to a shared directory with the host; the agent writes to a path that affects host behavior (e.g., a `.bashrc`, an `authorized_keys`, a crontab).
+
+**Instances**: a Jupyter kernel in a container that shares `/workspace` with the host; a Python interpreter that can write to `/tmp` on host.
+
+**Finding template**: agent writes `<file>` → host executes `<file>` on next event → sandbox escape.
+
+### Primitive Class: Sandbox-Escape via Package Installation
+
+**Class**: the sandbox allows `pip install` or `npm install`; the installed package's install script executes.
+
+**Instances**: a Python sandbox that permits network and `pip install`; attacker-authored package with malicious `setup.py`.
+
+**Finding template**: agent instructed to `pip install evil-pkg` → setup.py runs → sandbox escape.
+
+### Primitive Class: Memory-Tool Sandbox Escape (TOCTOU)
+
+As documented in the base — the 2026 Claude SDK Python CVE establishes this class. See the Memory-Tool Sandbox Integrity subsection above and `agentic_system_security_novel_deep` for the full CVE treatment.
 
 ## Safe Testing Workflow
 
@@ -193,6 +398,18 @@ A report must include:
 6. credential, feature, approval, environment, and user-interaction prerequisites
 7. cleanup/revocation and a bounded regression case
 
+## Chaining Attacks
+
+Agentic primitives chain through:
+
+- **Agent + classic vuln**: an agent with a `fetch_url` tool reaches an internal service — load `ssrf`; an agent with a `shell_exec` tool runs commands — load `rce`; an agent with an SQL tool runs queries — load `sql_injection`.
+- **Tool-metadata injection + confused deputy**: a document the agent summarizes contains instructions that the agent follows → load `llm_prompt_injection` for the attack primitive, this skill for the authority bypass.
+- **Memory poisoning + persistence**: inject tool-call-shaped content into memory → next session executes without new prompt → persistent-RCE-adjacent capability.
+- **DNS rebinding + loopback MCP → tool invocation**: attacker's web page reaches local MCP server → arbitrary tool call with user's auth.
+- **Token pass-through + privilege expansion**: upstream user token used downstream at a service with broader scope.
+- **Cross-client instance reuse → cross-user data leak**: stateless deployment pattern.
+- **Agent + business logic → scalping/API6:2023**: agent operates at machine speed, violates business invariants — load `business_logic`.
+
 ## False Positives
 
 - The model claims a tool ran but the target and audit log show no action.
@@ -202,6 +419,30 @@ A report must include:
 - A scanner flags an instruction string without showing that it reaches a privileged decision or sink.
 - A component has broad declared permissions but the runtime credential/network policy prevents the claimed access.
 
+## Impact
+
+- Unauthorized action at a downstream target (via confused-deputy chain)
+- Cross-user or cross-tenant data access (via instance reuse, memory sharing)
+- Local filesystem compromise (via memory TOCTOU)
+- Credential exfiltration (via token pass-through or log exposure)
+- Business-logic abuse at machine speed (API6:2023)
+- Supply-chain compromise (via tool rug-pull or compromised MCP server)
+- Audit-log laundering (actions attributed to agent, not to responsible user)
+- Persistent compromise via poisoned memory
+
+## Pro Tips
+
+1. Map authority before injecting prompts; don't test what you haven't modeled.
+2. Treat tool metadata (names, descriptions, examples, hints) as untrusted — never as authorization.
+3. Canonicalize tool identity as `server+version+transport+name+schema-digest`; two identically-named tools are distinct identities.
+4. Approval must bind arguments at approval time and re-verify at execution — a generic "continue?" is weak.
+5. Memory tools are a persistent attack surface; test TOCTOU and cross-session isolation.
+6. For MCP, inspect the transport-level security (OAuth audience, DNS rebinding protection, origin checks) before the tool-level security.
+7. Verify at the target's audit log, not the agent's narration.
+8. Prove with a dry-run before testing a consequential action; agents are not reversible.
+9. Cross-tenant tests require different tenants in test mode; synthetic data in each.
+10. Treat the agent's installed skills/plugins/servers as supply chain — each one is executable.
+
 ## Summary
 
-Agent security is capability security. Map the real authority carried through models, tools, credentials, plugins, and delegated agents; validate authorization and approval at the target-side effect; treat every installed component as executable supply chain; and preserve each confirmed boundary failure as a bounded regression.
+Agent security is capability security. Map the real authority carried through models, tools, credentials, plugins, and delegated agents; validate authorization and approval at the target-side effect; treat every installed component as executable supply chain; and preserve each confirmed boundary failure as a bounded regression. The 2024–2026 frontier is dense with verified CVE instances in MCP SDKs, LangChain, LangSmith, and Anthropic's own SDK — each a template for a reusable primitive. Load `agentic_system_security_advanced_deep` for full technique treatments; load `agentic_system_security_novel_deep` for the verified 2024–2026 CVE catalog and research-grade framing.
