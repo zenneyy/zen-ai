@@ -66,8 +66,18 @@ def _resolve_skills(
     ordered.append("tooling/python")
     ordered.append("analysis/counterevidence")
     ordered.append("analysis/severity_calibration")
+    if scan_mode == "deep":
+        ordered.append("validation/red_team_the_finding")
+        ordered.append("validation/negative_control_design")
+        ordered.append("validation/fp_taxonomy")
+        ordered.append("validation/blind_revalidation")
     if is_root:
         ordered.append("coordination/root_agent")
+        if scan_mode == "deep":
+            ordered.append("chaining/chain_construction")
+            ordered.append("chaining/chain_severity")
+            ordered.append("chaining/chain_validation")
+            ordered.append("chaining/primitive_taxonomy")
     if is_whitebox:
         ordered.append("coordination/source_aware_whitebox")
         ordered.append("custom/source_aware_sast")
