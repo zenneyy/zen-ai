@@ -67,6 +67,17 @@ quick/standard mode does not. This is part of what makes deep different:
 - DVCS and backup exposure probes are required (`.git/`, `.svn/`, `.hg/`, `.env*`,
   backup file suffixes).
 - Wayback and archive mining is required (`waybackurls`, `gau`).
+- **Stack registration**: after technology fingerprinting (`httpx -td`,
+  endpoint probing, JS bundle analysis), call
+  `register_detected_stack(frameworks=[...], protocols=[...], technologies=[...])`
+  with the bare slugs actually observed (e.g. `frameworks=["flask"]`,
+  `protocols=["graphql"]`, `technologies=["firebase"]`). Register only what
+  fingerprinting evidence confirms — not guesses. The framework then
+  auto-attaches the matching `frameworks/*`, `protocols/*`, and
+  `technologies/*` skills to every deep specialist spawned for that target;
+  specialists do not need to load these manually. Cloud providers (aws, gcp,
+  azure, kubernetes) are excluded from registration — they load reactively
+  via `load_skill` when SSRF confirms metadata-endpoint access (see Phase 4).
 
 - Additionally load the deep-sibling recon files alongside the base recon skills:
   - `asset_discovery_cloud_deep` — advanced cloud runtime, serverless, and edge platform enumeration
@@ -139,14 +150,17 @@ Test every input vector with every applicable technique.
 - CORS misconfiguration exploitation
 - WebSocket security testing
 - GraphQL-specific attacks (introspection, batching, nested queries)
-- LLM/RAG/agent features: load `llm_applications` for OWASP 2026 LLM01-LLM10 coverage and `llm_prompt_injection` for deep injection testing
+- LLM/RAG/agent features: if recon detects LLM/RAG/agent endpoints, register `technologies=["llm_applications"]` so the OWASP 2026 LLM01-LLM10 playbook auto-attaches; use `llm_prompt_injection` for deep injection testing
 
 ## Phase 4: Vulnerability Chaining
 
 Individual bugs are starting points. Chain them for maximum impact:
 
 - Combine information disclosure with access control bypass
-- Chain SSRF to reach internal services
+- Chain SSRF to reach internal services — when SSRF confirms cloud
+  metadata-endpoint reach (169.254.169.254 / cloud LB headers), load the
+  provider skill at runtime via `load_skill(["cloud/aws"])` (or `cloud/gcp`,
+  `cloud/azure`). Cloud skills are reactive by design, not spawn-attached.
 - Use low-severity findings to enable high-impact attacks
 - Build multi-step attack paths that automated tools miss
 - Cross component boundaries: user → admin, external → internal, read → write, single-tenant → cross-tenant
@@ -158,10 +172,10 @@ Individual bugs are starting points. Chain them for maximum impact:
 - Validate chains by executing the full sequence (proxy + browser for workflows, python for automation)
 - When a pivot is found, spawn focused agents to continue the chain in the next component
 
-Load `chain_construction`; it cross-references `primitive_taxonomy`,
-`chain_validation`, and `chain_severity` — pull those as the chain
-demands. These own the chain methodology; the bullets above are the
-deep-mode mandate for when to use it.
+`chain_construction`, `primitive_taxonomy`, `chain_validation`, and
+`chain_severity` are already loaded in deep mode (root agent). These own
+the chain methodology; the bullets above are the deep-mode mandate for
+when to apply them.
 
 ## Phase 5: Persistent Testing
 
@@ -179,9 +193,9 @@ When initial attempts fail:
 
 Before every report, challenge your own finding — in deep mode the bar is strict:
 
-- Load `red_team_the_finding`; it routes to `fp_taxonomy`,
-  `negative_control_design`, and `blind_revalidation` — pull those as
-  the finding demands.
+- `red_team_the_finding`, `fp_taxonomy`, `negative_control_design`, and
+  `blind_revalidation` are already loaded on every deep specialist — apply
+  them as the finding demands.
 - Negative control is required in deep mode: a finding without a
   baseline request that must NOT trigger is unconfirmed.
 - Re-validation under a fresh session is required for high-impact
@@ -212,6 +226,18 @@ Spawn specialized agents at each level. Scale horizontally to maximum paralleliz
 - Do NOT overload a single agent with multiple vulnerability types
 - Each agent focuses on one specific area or vulnerability type
 - Creates a massive parallel swarm covering every angle
+
+**Automatic skill loading in deep mode**: recon registers detected
+frameworks, protocols, and technologies via `register_detected_stack`;
+the matching skills (e.g. `frameworks/flask`, `protocols/graphql`,
+`technologies/llm_applications`) then auto-attach to every deep
+specialist. Available framework skills include `flask`, `express`,
+`rails`, `spring`, `laravel`, `django`, `fastapi`, `nestjs`, and
+`nextjs`. Validation skills load on every deep specialist; chaining
+skills load on the root agent. Cloud provider skills (`cloud/aws`,
+`cloud/gcp`, `cloud/azure`) load reactively at runtime when SSRF
+confirms metadata access. The agent's job is to register what it detects
+and use what is loaded, not manually pull playbooks.
 
 ## Mindset
 
