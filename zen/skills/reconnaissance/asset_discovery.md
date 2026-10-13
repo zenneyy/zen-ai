@@ -1,6 +1,16 @@
 ---
 name: asset-discovery
 description: Passive asset and attack-surface discovery via certificate transparency, TLS SAN and JARM/favicon-hash pivoting, passive DNS, and ASN/cloud-range enumeration to find hosts beyond subdomain brute force
+related:
+  - tooling/dnsx
+  - tooling/gau
+  - tooling/gitleaks
+  - tooling/httpx
+  - tooling/naabu
+  - tooling/subfinder
+  - tooling/tlsx
+  - tooling/trufflehog
+  - tooling/waybackurls
 ---
 
 # Asset Discovery

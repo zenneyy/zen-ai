@@ -1,6 +1,18 @@
 ---
 name: application-enumeration
 description: Application-level reconnaissance for live web targets covering route discovery, parameter enumeration, authenticated surface mapping, JavaScript bundle mining, multi-service architecture detection, and recon-completeness discipline before hunter scoping
+related:
+  - tooling/arjun
+  - tooling/feroxbuster
+  - tooling/ffuf
+  - tooling/gau
+  - tooling/gospider
+  - tooling/grpcurl
+  - tooling/jwt_tool
+  - tooling/katana
+  - tooling/trivy
+  - tooling/trufflehog
+  - tooling/waybackurls
 ---
 
 # Application Enumeration
