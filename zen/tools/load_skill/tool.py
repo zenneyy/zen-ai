@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from agents import RunContextWrapper, function_tool
 
-from zen.skills import load_skills, validate_requested_skills
+from zen.skills import find_deep_siblings, load_skills, validate_requested_skills
 
 
 @function_tool(timeout=10)
@@ -29,6 +29,12 @@ async def load_skill(ctx: RunContextWrapper, skills: list[str]) -> str:
     err = validate_requested_skills(requested)
     if err:
         return f"load_skill: {err}"
+    siblings = find_deep_siblings(requested)
+    seen = set(requested)
+    for s in siblings:
+        if s not in seen:
+            seen.add(s)
+            requested.append(s)
     contents = load_skills(requested)
     if not contents:
         return "load_skill: no content loaded for requested skills."
