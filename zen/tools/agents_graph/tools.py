@@ -545,7 +545,11 @@ async def create_agent(
             parent's input history as background; only set ``False``
             when starting a clean-slate task.
         skills: List of skill names (e.g. ``["xss", "sql_injection"]``).
-            Max 5; prefer 1-3.
+            Max 5 non-tooling skills; prefer 1-3.  ``tooling/*`` playbooks
+            (e.g. ``tooling/sqlmap``, ``tooling/ffuf``) can also be passed
+            and do not count toward the 5-skill cap.  Each vulnerability
+            class already auto-loads its core tools via ``related:``
+            frontmatter, so only pass tools beyond the auto-loaded set.
     """
     inner = _ctx(ctx)
     coordinator = coordinator_from_context(inner)

@@ -133,6 +133,10 @@ Structure agents by function:
 - Finding documentation
 - Remediation recommendations
 
+## Tooling Playbooks
+
+Each vulnerability class auto-loads the tooling it references through `related:` frontmatter — do not re-pass those slugs.  Pass a `tooling/*` slug explicitly only when a specialist needs a tool beyond its auto-loaded set (e.g. `create_agent(skills=["csrf", "tooling/ffuf"])`).  Tooling slugs are exempt from the 5-skill cap and do not count toward it.  Never pass `tooling/agent_browser` or `tooling/python` — every agent loads these automatically.
+
 ## Coordination Principles
 
 **Task Independence**

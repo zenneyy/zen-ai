@@ -318,10 +318,12 @@ def validate_requested_skills(skill_list: list[str], max_skills: int = 5) -> str
     Returns ``None`` on success, or a model-readable error message
     describing what was wrong (count exceeded, unknown names).
     """
-    if len(skill_list) > max_skills:
+    non_tooling = [s for s in skill_list if not s.startswith("tooling/")]
+    if len(non_tooling) > max_skills:
         return (
-            f"Cannot specify more than {max_skills} skills per agent; "
-            f"got {len(skill_list)}. Aim for 1-3 related skills per specialist."
+            f"Cannot specify more than {max_skills} non-tooling skills per agent; "
+            f"got {len(non_tooling)}. Aim for 1-3 related skills per specialist. "
+            f"Tooling skills (tooling/*) do not count toward this limit."
         )
     if not skill_list:
         return None
