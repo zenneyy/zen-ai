@@ -446,6 +446,7 @@ def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
                 parsed["shell"] = "bash"
             _apply_shell_output_cap(parsed)
             raw_input = json.dumps(parsed)
+            logger.info("agent command: %s", parsed.get("cmd", raw_input))
         try:
             return await invoke_tool(ctx, raw_input)
         except ValidationError as exc:

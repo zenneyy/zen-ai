@@ -158,6 +158,14 @@ def _register_impl(
             existing[ns] = merged
         _persist_locked()
 
+    logger.info(
+        "register_detected_stack: target=%s frameworks=%s protocols=%s technologies=%s",
+        identity,
+        accepted.get("frameworks", []),
+        accepted.get("protocols", []),
+        accepted.get("technologies", []),
+    )
+
     result: dict[str, Any] = {
         "success": True,
         "target": identity,
