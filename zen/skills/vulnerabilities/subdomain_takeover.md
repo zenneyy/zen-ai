@@ -1,6 +1,12 @@
 ---
 name: subdomain-takeover
 description: Subdomain takeover testing for dangling DNS records and unclaimed cloud resources
+related:
+  - tooling/dnsx
+  - tooling/httpx
+  - tooling/hypothesis
+  - tooling/nuclei
+  - tooling/subfinder
 ---
 
 # Subdomain Takeover

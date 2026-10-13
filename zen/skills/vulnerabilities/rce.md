@@ -1,6 +1,8 @@
 ---
 name: rce
 description: RCE testing covering command injection, deserialization, template injection, and code evaluation
+related:
+  - tooling/interactsh-client
 ---
 
 # RCE

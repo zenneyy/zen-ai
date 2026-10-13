@@ -1,6 +1,9 @@
 ---
 name: semantic-confusion
 description: Cross-component semantic confusion testing for parser differentials, canonicalization and normalization drift, overloaded fields, lifecycle state drift, internal redirects, protocol translation, and validator-to-sink inconsistencies across HTTP/URL/JSON/XML/YAML/MIME/multipart/ZIP/cookie surfaces
+related:
+  - tooling/hurl
+  - tooling/hypothesis
 ---
 
 # Semantic Confusion

@@ -1,6 +1,9 @@
 ---
 name: path-traversal-lfi-rfi
 description: Path traversal, LFI, and RFI — measured containment across path-join stacks, PHP filter-chain LFI→RCE, Windows ADS/8.3/UNC, Zip-Slip / archive-extraction, and the resolver-vs-web-boundary write-to-execution model
+related:
+  - tooling/ffuf
+  - tooling/interactsh-client
 ---
 
 # Path Traversal / LFI / RFI

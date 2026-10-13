@@ -1,6 +1,9 @@
 ---
 name: xxe
 description: XXE — measured parser-defaults across Java/Python/.NET/PHP/Ruby/Node, DTD-parameter-entity exfiltration (including egress-free local-DTD reuse), XInclude/XSLT surface, and cross-format expressions (SOAP/SAML/SVG/OOXML)
+related:
+  - tooling/interactsh-client
+  - tooling/semgrep
 ---
 
 # XXE

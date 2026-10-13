@@ -1,6 +1,9 @@
 ---
 name: cryptographic-failures
 description: Cryptographic failures — padding-oracle byte-at-a-time, ECB-mode pattern leakage, IV/nonce reuse, weak-randomness (MT19937 / time-seeded srand / predictable Math.random), hardcoded keys, hash length-extension (Merkle-Damgard MACs), and timing-attack classes
+related:
+  - tooling/gitleaks
+  - tooling/trufflehog
 ---
 
 # Cryptographic Failures

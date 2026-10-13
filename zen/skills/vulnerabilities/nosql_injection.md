@@ -1,6 +1,9 @@
 ---
 name: nosql-injection
 description: NoSQL injection testing — MongoDB operator injection, $where/$function/$expr JavaScript surfaces, aggregation-pipeline injection, blind extraction, GraphQL variable injection, and Redis/DynamoDB/Elasticsearch/CouchDB/Neo4j/Cassandra store-specific attack surfaces
+related:
+  - tooling/ffuf
+  - tooling/nuclei
 ---
 
 # NoSQL Injection

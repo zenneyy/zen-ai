@@ -1,6 +1,8 @@
 ---
 name: business-logic
 description: Business logic testing for workflow bypass, state-machine abuse, domain invariant violations, financial/entitlement flows, idempotency gaps, quota slicing, and multi-tenant isolation drift
+related:
+  - tooling/hypothesis
 ---
 
 # Business Logic Flaws

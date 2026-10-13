@@ -1,6 +1,10 @@
 ---
 name: prototype-pollution
 description: Client and server prototype pollution testing — merge/set/parse sinks, guard differential (__proto__ / constructor.prototype / Object.create(null)), Node universal-gadget chains (child_process / require / import), and 2024–2026 CVE surface
+related:
+  - tooling/ffuf
+  - tooling/nuclei
+  - tooling/semgrep
 ---
 
 # Prototype Pollution

@@ -1,6 +1,8 @@
 ---
 name: xss
 description: XSS testing across reflected, stored, DOM-based, and blind vectors with CSP and Trusted Types bypass, DOM clobbering, mutation-XSS and DOMPurify sanitizer bypass, script gadgets, and framework-specific sinks (React/RSC, Vue, Angular, Svelte, Solid, Qwik, Astro)
+related:
+  - tooling/interactsh-client
 ---
 
 # XSS

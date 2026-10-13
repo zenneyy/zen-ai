@@ -1,6 +1,13 @@
 ---
 name: idor
 description: IDOR/BOLA testing for object-level authorization failures — object-reference enumeration, the six-family BOLA taxonomy, two-account differential methodology, tenant boundaries, and confirmation via response/body cross-check against the true owner
+related:
+  - tooling/arjun
+  - tooling/grpcurl
+  - tooling/httpx
+  - tooling/hurl
+  - tooling/nuclei
+  - tooling/semgrep
 ---
 
 # IDOR

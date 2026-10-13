@@ -1,6 +1,9 @@
 ---
 name: weak-password-detection
 description: Weak password detection, credential stuffing, password spraying, and brute-force testing across web/app and cloud IdP logins (Entra/M365, Okta), covering default and system-generated credentials, OTP and reset-token attacks, WebAuthn/passkey fallback abuse, password-field DoS and bcrypt truncation, and HTTP fuzzing / NSE brute-force tooling
+related:
+  - tooling/ffuf
+  - tooling/nmap
 ---
 
 # Weak Password Detection / Credential Brute-Force

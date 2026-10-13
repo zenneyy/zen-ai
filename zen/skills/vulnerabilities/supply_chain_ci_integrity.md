@@ -1,6 +1,9 @@
 ---
 name: supply-chain-ci-integrity
 description: Supply-chain and CI/CD integrity — dependency confusion, typosquatting, maintainer-account compromise, build-system / postinstall hooks, GitHub Actions script injection, pull_request_target abuse, Actions cache poisoning, self-hosted-runner persistence, OIDC federation claim-validation gaps, SBOM/provenance poisoning, code-signing / sigstore verification bypass, and container-registry tampering
+related:
+  - tooling/hypothesis
+  - tooling/trufflehog
 ---
 
 # Supply-Chain and CI/CD Integrity

@@ -1,6 +1,11 @@
 ---
 name: http-request-smuggling
 description: HTTP request smuggling — CL.TE / TE.CL / H2.CL / H2.TE / CL.0 / 0.CL / client-side desync / pause-based desync / HTTP/2 request tunnelling / CONTINUATION flood DoS; detection, tooling, and exploitation methodology
+related:
+  - tooling/ffuf
+  - tooling/hypothesis
+  - tooling/interactsh-client
+  - tooling/nuclei
 ---
 
 # HTTP Request Smuggling

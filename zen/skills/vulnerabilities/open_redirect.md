@@ -1,6 +1,8 @@
 ---
 name: open-redirect
 description: Open redirect testing for phishing pivots, OAuth token theft, and allowlist bypass
+related:
+  - tooling/httpx
 ---
 
 # Open Redirect

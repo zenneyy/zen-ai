@@ -7,7 +7,13 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from zen.skills import find_deep_siblings, get_available_skills, load_skills, skill_search_dirs
+from zen.skills import (
+    find_deep_siblings,
+    find_related_skills,
+    get_available_skills,
+    load_skills,
+    skill_search_dirs,
+)
 from zen.tools.detected_stack.tools import get_detected_skill_slugs
 from zen.utils.resource_paths import get_zen_resource_path
 
@@ -60,6 +66,9 @@ def _resolve_skills(
     # per-agent skill lists in coordinators or factories.
     if scan_mode == "deep" and requested:
         ordered.extend(find_deep_siblings(requested))
+
+    if requested:
+        ordered.extend(find_related_skills(requested))
 
     ordered.append(f"scan_modes/{scan_mode}")
     if is_diff_scoped:

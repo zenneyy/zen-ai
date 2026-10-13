@@ -1,6 +1,9 @@
 ---
 name: authentication-jwt
 description: JWT and OIDC security testing covering token forgery, algorithm confusion (incl. ECDSA psychic signatures / CVE-2022-21449), JWKS-spoofing key injection (jwk/jku/x5u/kid), JWE attacks, cross-service token confusion, and claim manipulation
+related:
+  - tooling/httpx
+  - tooling/jwt_tool
 ---
 
 # Authentication / JWT / OIDC

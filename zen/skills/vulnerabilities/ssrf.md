@@ -1,6 +1,10 @@
 ---
 name: ssrf
 description: SSRF exploitation — the attacker-chosen outbound request primitive from a server-side sink, the six controllables that decide chain reach (scheme, host, path, headers, method, body), parser and resolver differentials, cloud-metadata reachability (with IMDSv2/GCP/Azure extraction gates routed to cloud/*), DNS rebinding, redirect abuse, protocol smuggling, and the chains into cloud credential extraction, internal-service RCE, and Kubernetes lateral movement
+related:
+  - tooling/httpx
+  - tooling/hypothesis
+  - tooling/interactsh-client
 ---
 
 # SSRF

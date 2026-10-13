@@ -1,6 +1,9 @@
 ---
 name: ssji
 description: Server-side JavaScript injection — eval-context primitives (Function/eval/AsyncFunction/node:vm), per-runtime sandbox-escape differential (node:vm vs vm2 vs isolated-vm vs QuickJS), template-engine JS sinks, and chains into host RCE
+related:
+  - tooling/interactsh-client
+  - tooling/semgrep
 ---
 
 # Server-Side JavaScript Injection

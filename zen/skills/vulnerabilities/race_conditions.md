@@ -1,6 +1,9 @@
 ---
 name: race-conditions
 description: Race-condition testing — single-packet HTTP/2 request alignment, multi-endpoint and partial-construction races, idempotency and dedup bypass classes, atomicity-gap classes across SQL/Redis/distributed locks, and the chaining surface into IDOR, business-logic, and auth.
+related:
+  - tooling/httpx
+  - tooling/hypothesis
 ---
 
 # Race Conditions

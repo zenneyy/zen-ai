@@ -1,6 +1,10 @@
 ---
 name: ssti
 description: Server-side template injection across Jinja / Mako / Velocity / Freemarker / Thymeleaf / Twig / Handlebars / EJS / ERB / Smarty / Blade / Go text-and-html-template / Razor / Scriban / Liquid, plus SSTI+LLM prompt-template crossover, framework-layer SSTI (Flask / Django / Express / SpEL), and CI/CD expression injection. Covers engine fingerprinting, sandbox escape, RCE gadget chains, confirmation without RCE, and the Jinja2 Environment vs SandboxedEnvironment differential as the class's canonical framing.
+related:
+  - tooling/hypothesis
+  - tooling/interactsh-client
+  - tooling/semgrep
 ---
 
 # Server-Side Template Injection

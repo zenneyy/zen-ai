@@ -1,6 +1,16 @@
 ---
 name: broken-function-level-authorization
 description: BFLA testing for function/action-level authorization failures — verb tampering, forced browsing, X-Original-URL/X-Rewrite-URL bypasses, param/role escalation, mass-assignment crossover, two-user session-swap methodology, and admin-endpoint direct invocation
+related:
+  - tooling/ffuf
+  - tooling/gau
+  - tooling/grpcurl
+  - tooling/httpx
+  - tooling/hurl
+  - tooling/jwt_tool
+  - tooling/katana
+  - tooling/nuclei
+  - tooling/waybackurls
 ---
 
 # Broken Function Level Authorization (BFLA)

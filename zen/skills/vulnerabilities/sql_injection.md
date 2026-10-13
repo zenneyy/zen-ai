@@ -1,6 +1,10 @@
 ---
 name: sql-injection
 description: SQL injection testing across value-position and identifier-position sinks, DBMS engine primitives (MySQL/PostgreSQL/MSSQL/Oracle/SQLite), ORM and query-builder parameterization gaps (Django Q/FilteredRelation, SQLAlchemy text, MyBatis ${}, Hibernate), JDBC-driver line-comment generation, blind and OAST channels, and the chains into authentication bypass, file write, and RCE
+related:
+  - tooling/interactsh-client
+  - tooling/semgrep
+  - tooling/sqlmap
 ---
 
 # SQL Injection

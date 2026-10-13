@@ -1,6 +1,8 @@
 ---
 name: second-order-injection
 description: Second-order injection — stored user input triggering injection on a later request/path/user, across SQL/LDAP/XPath/template/expression/command/XSS classes; the attack is the storage path + the firing path together, not either in isolation
+related:
+  - tooling/sqlmap
 ---
 
 # Second-Order Injection

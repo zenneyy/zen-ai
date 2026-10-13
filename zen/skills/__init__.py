@@ -203,6 +203,59 @@ def find_deep_siblings(base_skill_names: list[str]) -> list[str]:
     return siblings
 
 
+_TAIL_TOOLING: frozenset[str] = frozenset({"tooling/agent_browser", "tooling/python"})
+
+
+def find_related_skills(requested: list[str]) -> list[str]:
+    """Collect ``related:`` tooling slugs from each requested skill's frontmatter.
+
+    Mirrors :func:`find_deep_siblings`: reads each requested slug's YAML
+    frontmatter for a ``related:`` list of ``tooling/*`` slugs, deduplicates
+    (preserving discovery order), and skips unresolvable entries with a
+    warning.  Tail-appended tooling (``agent_browser``, ``python``) is
+    excluded — those are added unconditionally by the prompt renderer.
+    """
+    related: list[str] = []
+    seen: set[str] = set()
+
+    for skill_ref in requested:
+        file_path = _qualified_skill_file_for_name(skill_ref)
+        if file_path is None:
+            bare_files = _bare_skill_files(skill_ref.split("/")[-1])
+            file_path = bare_files[0] if len(bare_files) == 1 else None
+        if file_path is None:
+            continue
+        metadata = _read_skill_metadata(file_path)
+        raw_related = metadata.get("related", "")
+        if not raw_related:
+            continue
+        try:
+            slugs = yaml.safe_load(raw_related)
+        except yaml.YAMLError:
+            logger.warning("Bad related: YAML in %s", file_path)
+            continue
+        if not isinstance(slugs, list):
+            logger.warning("related: is not a list in %s", file_path)
+            continue
+        for slug in slugs:
+            slug_str = str(slug).strip()
+            if not slug_str or slug_str in _TAIL_TOOLING:
+                continue
+            if slug_str in seen:
+                continue
+            if not _candidate_skill_files(slug_str):
+                logger.warning(
+                    "related: slug %r in %s does not resolve — skipped",
+                    slug_str,
+                    file_path,
+                )
+                continue
+            seen.add(slug_str)
+            related.append(slug_str)
+
+    return related
+
+
 def _parse_skill_content(content: str, source: Path | None = None) -> tuple[dict[str, str], str]:
     """Parse skill frontmatter once and return metadata plus markdown body."""
     frontmatter = _FRONTMATTER_PATTERN.match(content)

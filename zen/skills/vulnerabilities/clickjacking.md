@@ -1,6 +1,8 @@
 ---
 name: clickjacking
 description: "UI-redress / clickjacking testing — classic iframe overlay, likejacking, cursorjacking, drag-and-drop, nested frames, keyboard UI redress, with X-Frame-Options, CSP frame-ancestors, and SameSite-cookie defense-enforcement discipline."
+related:
+  - tooling/nuclei
 ---
 
 # Clickjacking (UI Redress)

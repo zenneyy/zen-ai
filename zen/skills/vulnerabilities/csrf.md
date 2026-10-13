@@ -1,6 +1,12 @@
 ---
 name: csrf
 description: CSRF — token/double-submit bypass, SameSite (Chrome Lax+POST window; same-site sibling pivots), Fetch Metadata, CORS misconfig, CSWSH (WebSocket hijacking), state-change abuse; PoC templates included
+related:
+  - tooling/caido
+  - tooling/ffuf
+  - tooling/gau
+  - tooling/interactsh-client
+  - tooling/nuclei
 ---
 
 # CSRF

@@ -1,6 +1,12 @@
 ---
 name: information-disclosure
 description: Information disclosure testing covering error messages, debug endpoints, metadata leakage, and source exposure
+related:
+  - tooling/ffuf
+  - tooling/gitleaks
+  - tooling/grpcurl
+  - tooling/httpx
+  - tooling/katana
 ---
 
 # Information Disclosure

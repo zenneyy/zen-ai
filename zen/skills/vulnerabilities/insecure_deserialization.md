@@ -1,6 +1,11 @@
 ---
 name: insecure-deserialization
 description: Insecure deserialization across Java (native serialization + Jackson/Fastjson polymorphic typing + Hessian/Kryo), Python (pickle/YAML/jsonpickle + ML-pipeline unsafe-by-default cluster), PHP (unserialize + PHAR), .NET (BinaryFormatter/ViewState + Json.NET TypeNameHandling), Ruby (Marshal + Psych), Node.js (node-serialize + serialize-javascript), Go/Rust (encoding/gob + serde), and JWT/JWS/JWE (algorithm confusion + nested-JWT DoS), covering gadget-chain selection against fingerprinted classpath, format-parser differentials, JEP 290/415 filter architecture, and the Sleeping Giants supply-chain reframing.
+related:
+  - tooling/hypothesis
+  - tooling/interactsh-client
+  - tooling/nmap
+  - tooling/semgrep
 ---
 
 # Insecure Deserialization
