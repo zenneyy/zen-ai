@@ -1,8 +1,6 @@
 ---
 name: ldap-injection
 description: LDAP injection testing — filter and distinguished-name injection, authentication bypass via OR-filter grouping, blind extraction, wildcard enumeration, and per-directory parsing differentials (OpenLDAP / Active Directory / 389 / FreeIPA)
-related:
-  - tooling/nmap
 ---
 
 # LDAP Injection

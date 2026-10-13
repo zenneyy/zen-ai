@@ -1,8 +1,6 @@
 ---
 name: dos-resource-exhaustion
 description: DoS and resource exhaustion — ReDoS (regex catastrophic backtracking), algorithmic complexity attacks (quadratic parsers, hash flooding, polynomial unification), decompression bombs (zip/gzip/brotli), GraphQL depth/batching/aliasing, XML XEE/billion-laughs, memory/CPU exhaustion in network protocols
-related:
-  - tooling/bandit
 ---
 
 # DoS and Resource Exhaustion
