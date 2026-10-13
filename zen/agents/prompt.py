@@ -8,6 +8,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from zen.skills import find_deep_siblings, get_available_skills, load_skills, skill_search_dirs
+from zen.tools.detected_stack.tools import get_detected_skill_slugs
 from zen.utils.resource_paths import get_zen_resource_path
 
 
@@ -24,6 +25,7 @@ def _resolve_skills(
     is_whitebox: bool = False,
     is_root: bool = False,
     is_diff_scoped: bool = False,
+    scan_targets: list[str] | None = None,
 ) -> list[str]:
     """Build the deduped, ordered skills list for the prompt render.
 
@@ -84,6 +86,9 @@ def _resolve_skills(
         ordered.append("analysis/source_aware_discovery")
         ordered.append("analysis/fix_verification")
 
+    if scan_mode == "deep":
+        ordered.extend(get_detected_skill_slugs(scan_targets))
+
     deduped: list[str] = []
     seen: set[str] = set()
     for skill in ordered:
@@ -102,6 +107,7 @@ def render_system_prompt(
     is_diff_scoped: bool = False,
     interactive: bool = False,
     system_prompt_context: dict[str, Any] | None = None,
+    scan_targets: list[str] | None = None,
 ) -> str:
     """Render the system prompt. Returns empty string on template failure."""
     try:
@@ -121,6 +127,7 @@ def render_system_prompt(
             is_whitebox=is_whitebox,
             is_root=is_root,
             is_diff_scoped=is_diff_scoped,
+            scan_targets=scan_targets,
         )
         skill_content = load_skills(skills_to_load)
         env.globals["get_skill"] = lambda name: skill_content.get(name, "")

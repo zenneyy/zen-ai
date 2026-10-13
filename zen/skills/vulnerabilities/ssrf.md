@@ -231,7 +231,7 @@ Chaining is modeled precondition/postcondition: each primitive names what capabi
 ### Downstream — capability the primitive grants
 
 - **Internal-network reach with an attacker-chosen request** — the primary capability. Cap = the six controllables.
-- **Metadata-endpoint reach** — reach only. Route the credential-extraction gate to `cloud/aws.md` (IMDSv2 PUT/hop-limit/header), `cloud/gcp.md` (`Metadata-Flavor: Google`), `cloud/azure.md` (`Metadata: true`). The gate is decided by whether the controllables include method+header.
+- **Metadata-endpoint reach** — reach only. Route the credential-extraction gate to `cloud/aws.md` (IMDSv2 PUT/hop-limit/header), `cloud/gcp.md` (`Metadata-Flavor: Google`), `cloud/azure.md` (`Metadata: true`). The gate is decided by whether the controllables include method+header. When metadata reach is confirmed, call ``load_skill(["cloud/aws"])`` (or ``cloud/gcp``, ``cloud/azure``) to load the provider-specific extraction playbook at runtime.
 - **Internal RCE via protocol smuggling** — gopher → Redis/FCGI → shell (see `ssrf_advanced_deep.md`); route the post-exploitation ordering to `rce`.
 - **Kubernetes lateral movement** — Kubelet at 10250 with an SA token from a leaked filesystem read (chain with `path_traversal_lfi_rfi`), or Kubernetes API with an in-pod SA token; route to `kubernetes` for the pod/RBAC ordering.
 - **Docker daemon control** — `http://localhost:2375/v1.24/containers/create` reachable via SSRF → container-create → host filesystem mount → break-out.

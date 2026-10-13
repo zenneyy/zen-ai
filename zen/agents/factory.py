@@ -27,6 +27,7 @@ from zen.tools.agents_graph.tools import (
     wait_for_agents,
 )
 from zen.tools.coverage.tools import list_coverage, record_coverage, update_coverage
+from zen.tools.detected_stack.tools import register_detected_stack
 from zen.tools.finish.tool import finish_scan
 from zen.tools.load_skill.tool import load_skill
 from zen.tools.mcp import (
@@ -585,6 +586,7 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     get_threat_model,
     save_threat_model,
     amend_threat_model,
+    register_detected_stack,
     web_search,
     web_get_contents,
     create_vulnerability_report,
@@ -668,6 +670,7 @@ def build_zen_agent(
     system_prompt_context: dict[str, Any] | None = None,
     extra_tools: Sequence[Tool] | None = None,
     instructions_override: str | None = None,
+    scan_targets: list[str] | None = None,
 ) -> SandboxAgent[Any]:
     """Build a SandboxAgent for either root or child use.
 
@@ -692,6 +695,7 @@ def build_zen_agent(
             is_diff_scoped=is_diff_scoped,
             interactive=interactive,
             system_prompt_context=system_prompt_context,
+            scan_targets=scan_targets,
         )
 
     agent_tools = [*_EXTRA_TOOLS, *(extra_tools or [])]
@@ -752,6 +756,7 @@ def make_child_factory(
     chat_completions_tools: bool = False,
     strict_tool_schemas: bool = True,
     system_prompt_context: dict[str, Any] | None = None,
+    scan_targets: list[str] | None = None,
 ) -> Any:
     """Return the runner-owned builder used by ``spawn_child_agent``.
 
@@ -772,6 +777,7 @@ def make_child_factory(
             chat_completions_tools=chat_completions_tools,
             strict_tool_schemas=strict_tool_schemas,
             system_prompt_context=system_prompt_context,
+            scan_targets=scan_targets,
         )
 
     return _factory

@@ -122,9 +122,10 @@ For ASN-owned ranges, sweep IPs directly with `naabu`/`httpx` and read served ce
 1. **Dedupe** names and IPs into one inventory; record source(s) per asset for confidence.
 2. **Live probe** with `httpx`, capturing status/title/tech/server and cert SANs in one pass — each grabbed SAN feeds back as a new seed:
    `httpx -l hosts.txt -sc -title -server -td -tls-grab -json -o assets.jsonl`
-3. **Classify** assets by function from title/tech/path signals: app, API, marketing, auth, CI/CD, observability, storage, admin, VCS, mail. Cluster by role, not by a specific product.
-4. **Port sweep** interesting hosts with `naabu` for non-HTTP services (DBs, caches, brokers, mgmt ports).
-5. **Prioritize** by exposure and value, then hand each finding to the right specialist skill:
+3. **Register detected stack** — after probing, call ``register_detected_stack`` with the frameworks, protocols, and technologies identified from ``-td`` output and endpoint probing (e.g. ``register_detected_stack(frameworks=["flask"], protocols=["graphql"])``). This ensures specialist agents spawned later automatically receive the matching skill playbooks. Only register what is actually observed — fingerprinting evidence, not guesses.
+4. **Classify** assets by function from title/tech/path signals: app, API, marketing, auth, CI/CD, observability, storage, admin, VCS, mail. Cluster by role, not by a specific product.
+5. **Port sweep** interesting hosts with `naabu` for non-HTTP services (DBs, caches, brokers, mgmt ports).
+6. **Prioritize** by exposure and value, then hand each finding to the right specialist skill:
    - Exposed dashboards / debug / observability / metadata leaks → `information_disclosure`
    - Login/admin panels with default or weak creds → `weak_password_detection`
    - Dangling DNS / unclaimed provider resources → `subdomain_takeover`

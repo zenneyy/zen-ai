@@ -152,6 +152,7 @@ def _compose_root_instructions_override(
     is_diff_scoped: bool,
     interactive: bool,
     system_prompt_context: dict[str, Any],
+    scan_targets: list[str] | None = None,
 ) -> str | None:
     if root_instructions_override is None:
         return None
@@ -164,6 +165,7 @@ def _compose_root_instructions_override(
         is_diff_scoped=is_diff_scoped,
         interactive=interactive,
         system_prompt_context=system_prompt_context,
+        scan_targets=scan_targets,
     )
     return (
         f"{base_instructions}\n\n"
@@ -259,6 +261,7 @@ async def run_zen_scan(
     coordinator.set_snapshot_path(agents_path)
 
     from zen.tools.coverage.tools import hydrate_coverage_from_disk
+    from zen.tools.detected_stack.tools import hydrate_detected_stack_from_disk
     from zen.tools.notes.tools import hydrate_notes_from_disk
     from zen.tools.threat_model.tools import hydrate_threat_models_from_disk
     from zen.tools.todo.tools import hydrate_todos_from_disk
@@ -267,6 +270,7 @@ async def run_zen_scan(
     hydrate_notes_from_disk(state_dir)
     hydrate_coverage_from_disk(state_dir)
     hydrate_threat_models_from_disk(state_dir)
+    hydrate_detected_stack_from_disk(state_dir)
 
     root_id: str | None = None
     if is_resume:
@@ -375,6 +379,7 @@ async def run_zen_scan(
             coordinator.set_budget_extender(hooks.extend_budget)
 
         scope_context = build_scope_context(scan_config)
+        scan_targets = build_scan_targets(scan_config)
 
         # Attach the run's MCP connections and hold their live sessions in a
         # per-run registry. The connections are source-agnostic: a caller
@@ -445,6 +450,7 @@ async def run_zen_scan(
             is_diff_scoped=is_diff_scoped,
             interactive=interactive,
             system_prompt_context=root_context,
+            scan_targets=scan_targets,
         )
 
         root_agent = build_zen_agent(
@@ -459,6 +465,7 @@ async def run_zen_scan(
             strict_tool_schemas=strict_tool_schemas,
             system_prompt_context=root_context,
             instructions_override=root_instructions,
+            scan_targets=scan_targets,
         )
 
         if not is_resume:
@@ -478,6 +485,7 @@ async def run_zen_scan(
             chat_completions_tools=chat_completions_tools,
             strict_tool_schemas=strict_tool_schemas,
             system_prompt_context=scope_context,
+            scan_targets=scan_targets,
         )
 
         async def spawn_child_agent(**kwargs: Any) -> dict[str, Any]:
@@ -503,7 +511,7 @@ async def run_zen_scan(
             "parent_id": None,
             "interactive": interactive,
             "spawn_child_agent": spawn_child_agent,
-            "scan_targets": build_scan_targets(scan_config),
+            "scan_targets": scan_targets,
             "max_context_images": settings.runtime.max_context_images,
         }
 
