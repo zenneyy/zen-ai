@@ -599,11 +599,12 @@ async def create_agent(
         )
 
     logger.info(
-        "create_agent: spawned %s (%s) parent=%s skills=%d task_len=%d",
+        "create_agent: spawned %s (%s) parent=%s skills=%d requested=%s task_len=%d",
         result.get("agent_id"),
         name,
         parent_id or "-",
         len(skill_list),
+        skill_list,
         len(task or ""),
     )
 
