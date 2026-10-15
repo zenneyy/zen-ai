@@ -133,9 +133,18 @@ For ASN-owned ranges, sweep IPs directly with `naabu`/`httpx` and read served ce
 2. **Live probe** with `httpx`, capturing status/title/tech/server and cert SANs in one pass — each grabbed SAN feeds back as a new seed:
    `httpx -l hosts.txt -sc -title -server -td -tls-grab -json -o assets.jsonl`
 3. **Register detected stack** — after probing, call ``register_detected_stack`` with the frameworks, protocols, and technologies identified from ``-td`` output and endpoint probing (e.g. ``register_detected_stack(frameworks=["flask"], protocols=["graphql"])``). This ensures specialist agents spawned later automatically receive the matching skill playbooks. Only register what is actually observed — fingerprinting evidence, not guesses.
-4. **Classify** assets by function from title/tech/path signals: app, API, marketing, auth, CI/CD, observability, storage, admin, VCS, mail. Cluster by role, not by a specific product.
-5. **Port sweep** interesting hosts with `naabu` for non-HTTP services (DBs, caches, brokers, mgmt ports).
-6. **Prioritize** by exposure and value, then hand each finding to the right specialist skill:
+4. **Resolve request-path stages** — do not assume the framework from ``-td`` is the only processing stage. Determine whether any stages sit in front of it by inspecting full response headers (``curl -sD - <target> -o /dev/null``):
+   - Compare the ``-td`` technology signal against the ``Server`` header and any other stage-identifying headers. A discrepancy — the front-facing header names a different technology than the detected application framework — indicates at least one processing stage in front (depth > 1).
+   - Parse hop-revealing headers that accumulate per stage (e.g. ``Via``, forwarding headers, multiple or duplicated server-identifying headers): each distinct value is evidence of an additional stage.
+   - Note conflicting or layered technology signals generally (front-of-path header disagreeing with application-level behavior).
+   - If a port accepts a TCP connection but HTTP requests to it stall or time out, that transport-layer/application-layer divergence is evidence of a front stage (the connection acceptor) with a separate, unresponsive backend — record it as a multi-stage signal rather than treating the endpoint as simply down.
+
+   When evidence shows more than one processing stage, call ``register_architecture`` with the stages as an ordered list, front-most first:
+   ``register_architecture(hops=[{"name": "<front-label>", "role": "<observed function>"}, {"name": "<back-label>", "role": "application handler"}], target="<target>")``
+   Use short, neutral labels derived from what was observed — an unidentified front stage can be labeled descriptively (e.g. ``"name": "reverse-proxy"``, ``"name": "load-balancer"``). Order matters: front → back. This is what makes multi-stage boundary playbooks load for later specialists. Only register what is actually observed — evidence, not guesses.
+5. **Classify** assets by function from title/tech/path signals: app, API, marketing, auth, CI/CD, observability, storage, admin, VCS, mail. Cluster by role, not by a specific product.
+6. **Port sweep** interesting hosts with `naabu` for non-HTTP services (DBs, caches, brokers, mgmt ports).
+7. **Prioritize** by exposure and value, then hand each finding to the right specialist skill:
    - Exposed dashboards / debug / observability / metadata leaks → `information_disclosure`
    - Login/admin panels with default or weak creds → `weak_password_detection`
    - Dangling DNS / unclaimed provider resources → `subdomain_takeover`

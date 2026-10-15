@@ -78,6 +78,7 @@ quick/standard mode does not. This is part of what makes deep different:
   specialists do not need to load these manually. Cloud providers (aws, gcp,
   azure, kubernetes) are excluded from registration — they load reactively
   via `load_skill` when SSRF confirms metadata-endpoint access (see Phase 4).
+- **Architecture registration**: when fingerprinting reveals more than one processing stage in the request path (front-facing header differs from detected application framework, hop-revealing headers present, or transport/application-layer divergence), call ``register_architecture(hops=[...])`` with the stages in order, front-most first — this gates multi-stage boundary playbooks for specialists.
 
 - Additionally load the deep-sibling recon files alongside the base recon skills:
   - `asset_discovery_cloud_deep` — advanced cloud runtime, serverless, and edge platform enumeration
