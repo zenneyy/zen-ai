@@ -14,7 +14,7 @@ from zen.skills import (
     load_skills,
     skill_search_dirs,
 )
-from zen.tools.detected_stack.tools import get_detected_skill_slugs
+from zen.tools.detected_stack.tools import get_detected_skill_slugs, max_architecture_depth
 from zen.utils.resource_paths import get_zen_resource_path
 
 
@@ -67,8 +67,31 @@ def _resolve_skills(
     if scan_mode == "deep" and requested:
         ordered.extend(find_deep_siblings(requested))
 
+    siblings_added = [s for s in ordered if s not in set(requested or [])]
+
+    pre_related = len(ordered)
     if requested:
         ordered.extend(find_related_skills(requested))
+    related_added = ordered[pre_related:]
+
+    tooling_requested = [s for s in (requested or []) if s.startswith("tooling/")]
+    tooling_related = [s for s in related_added if s.startswith("tooling/")]
+
+    if requested or siblings_added or related_added:
+        logger.info(
+            "skill_resolve: requested=%s deep_siblings=%s"
+            " tooling_requested=%s tooling_related=%s"
+            " (requested=%d +deep=%d +tooling=%d +rest=%d =%d)",
+            list(requested or []),
+            siblings_added,
+            tooling_requested,
+            tooling_related,
+            len(requested or []),
+            len(siblings_added),
+            len(tooling_requested) + len(tooling_related),
+            len(related_added) - len(tooling_related),
+            len(requested or []) + len(siblings_added) + len(related_added),
+        )
 
     ordered.append(f"scan_modes/{scan_mode}")
     if is_diff_scoped:
@@ -97,6 +120,12 @@ def _resolve_skills(
 
     if scan_mode == "deep":
         ordered.extend(get_detected_skill_slugs(scan_targets))
+
+    if scan_mode == "deep" and max_architecture_depth(scan_targets) > 1:
+        arch_gated = ["vulnerabilities/http_request_smuggling"]
+        ordered.extend(arch_gated)
+        ordered.extend(find_deep_siblings(arch_gated))
+        ordered.extend(find_related_skills(arch_gated))
 
     deduped: list[str] = []
     seen: set[str] = set()
