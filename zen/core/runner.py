@@ -261,7 +261,10 @@ async def run_zen_scan(
     coordinator.set_snapshot_path(agents_path)
 
     from zen.tools.coverage.tools import hydrate_coverage_from_disk
-    from zen.tools.detected_stack.tools import hydrate_detected_stack_from_disk
+    from zen.tools.detected_stack.tools import (
+        hydrate_architecture_from_disk,
+        hydrate_detected_stack_from_disk,
+    )
     from zen.tools.notes.tools import hydrate_notes_from_disk
     from zen.tools.threat_model.tools import hydrate_threat_models_from_disk
     from zen.tools.todo.tools import hydrate_todos_from_disk
@@ -271,6 +274,7 @@ async def run_zen_scan(
     hydrate_coverage_from_disk(state_dir)
     hydrate_threat_models_from_disk(state_dir)
     hydrate_detected_stack_from_disk(state_dir)
+    hydrate_architecture_from_disk(state_dir)
 
     root_id: str | None = None
     if is_resume:

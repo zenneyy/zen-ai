@@ -27,7 +27,7 @@ from zen.tools.agents_graph.tools import (
     wait_for_agents,
 )
 from zen.tools.coverage.tools import list_coverage, record_coverage, update_coverage
-from zen.tools.detected_stack.tools import register_detected_stack
+from zen.tools.detected_stack.tools import register_architecture, register_detected_stack
 from zen.tools.finish.tool import finish_scan
 from zen.tools.load_skill.tool import load_skill
 from zen.tools.mcp import (
@@ -588,6 +588,7 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     save_threat_model,
     amend_threat_model,
     register_detected_stack,
+    register_architecture,
     web_search,
     web_get_contents,
     create_vulnerability_report,

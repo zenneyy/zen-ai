@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from agents import RunContextWrapper, function_tool
+from pydantic import BaseModel, Field
 
 from zen.skills import _candidate_skill_files
 from zen.tools.threat_model.tools import _resolve_target, _target_identity
@@ -277,6 +278,219 @@ async def register_detected_stack(
             frameworks=list(frameworks or []),
             protocols=list(protocols or []),
             technologies=list(technologies or []),
+            scan_targets=_scan_targets(ctx),
+        ),
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+# ── Architecture (ordered request-path) store ────────────────────────
+#
+# Sibling to _DETECTED_STACK.  Holds the ordered sequence of processing
+# stages (hops) a request traverses, front-to-back.  Each hop is a dict
+# with at minimum {"name": "<label>"}; an optional "role" field describes
+# the hop's function.  Depth = len(hops) = node count.
+#
+# This store is data, not skill slugs — hops never feed the slug→file
+# pipeline.
+
+_DETECTED_ARCHITECTURE: dict[str, list[dict[str, str]]] = {}
+_arch_store_path: Path | None = None
+
+
+def hydrate_architecture_from_disk(state_dir: Path) -> None:
+    """Load a persisted architecture store from a previous or resumed run."""
+    global _arch_store_path  # noqa: PLW0603
+    _arch_store_path = state_dir / "detected_architecture.json"
+    with _store_lock:
+        _DETECTED_ARCHITECTURE.clear()
+        if not _arch_store_path.is_file():
+            return
+        try:
+            data = json.loads(_arch_store_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.exception(
+                "detected_architecture.json at %s is unreadable; starting empty",
+                _arch_store_path,
+            )
+            return
+        if not isinstance(data, dict):
+            return
+        for identity, hops in data.items():
+            if not isinstance(identity, str) or not isinstance(hops, list):
+                continue
+            if all(isinstance(h, dict) for h in hops):
+                _DETECTED_ARCHITECTURE[identity] = hops
+        logger.info(
+            "architecture store hydrated from %s (%d target(s))",
+            _arch_store_path,
+            len(_DETECTED_ARCHITECTURE),
+        )
+
+
+def _persist_architecture_locked() -> None:
+    """Mirror the architecture store to disk.  Caller must hold ``_store_lock``."""
+    path = _arch_store_path
+    if path is None:
+        return
+    try:
+        payload = json.dumps(_DETECTED_ARCHITECTURE, ensure_ascii=False)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(payload)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)
+    except OSError:
+        logger.exception("architecture store mirror to %s failed", path)
+
+
+def _register_architecture_impl(
+    target: str,
+    *,
+    hops: list[dict[str, str]],
+    scan_targets: list[str] | None = None,
+) -> dict[str, Any]:
+    resolved, error = _resolve_target(target, scan_targets)
+    if resolved is None:
+        return {"success": False, "error": error}
+
+    identity = _target_identity(resolved)
+
+    if not isinstance(hops, list) or not all(isinstance(h, dict) for h in hops):
+        return {
+            "success": False,
+            "error": "hops must be a list of dicts, each with at least a 'name' key.",
+        }
+    if not all(isinstance(h.get("name"), str) and h["name"].strip() for h in hops):
+        return {
+            "success": False,
+            "error": "Every hop must have a non-empty 'name' string.",
+        }
+
+    cleaned: list[dict[str, str]] = [
+        {k: v for k, v in h.items() if isinstance(k, str) and isinstance(v, str)}
+        for h in hops
+    ]
+
+    with _store_lock:
+        _DETECTED_ARCHITECTURE[identity] = cleaned
+        _persist_architecture_locked()
+
+    logger.info(
+        "register_architecture: target=%s depth=%d hops=%s",
+        identity,
+        len(cleaned),
+        [h.get("name") for h in cleaned],
+    )
+
+    return {
+        "success": True,
+        "target": identity,
+        "depth": len(cleaned),
+        "hops": cleaned,
+    }
+
+
+def read_architecture(
+    target: str,
+    scan_targets: list[str] | None = None,
+) -> list[dict[str, str]]:
+    """Ordered hop list for one target.  Empty list if none registered."""
+    resolved, _ = _resolve_target(target, scan_targets)
+    if resolved is None:
+        return []
+    identity = _target_identity(resolved)
+    with _store_lock:
+        entry = _DETECTED_ARCHITECTURE.get(identity)
+        return list(entry) if entry else []
+
+
+def architecture_depth(
+    target: str,
+    scan_targets: list[str] | None = None,
+) -> int:
+    """Node count for one target's request path.  0 if none registered."""
+    return len(read_architecture(target, scan_targets))
+
+
+def max_architecture_depth(
+    scan_targets: list[str] | None = None,
+) -> int:
+    """Maximum architecture depth across all scan targets."""
+    with _store_lock:
+        if not scan_targets:
+            entries = list(_DETECTED_ARCHITECTURE.values())
+        else:
+            entries = []
+            for target in scan_targets:
+                resolved, _ = _resolve_target(target, scan_targets)
+                if resolved is None:
+                    continue
+                identity = _target_identity(resolved)
+                entry = _DETECTED_ARCHITECTURE.get(identity)
+                if entry:
+                    entries.append(entry)
+    if not entries:
+        return 0
+    return max(len(e) for e in entries)
+
+
+class ArchitectureHop(BaseModel):
+    """A single processing stage in the request path."""
+
+    name: str = Field(description="Short label for this processing stage.")
+    role: str = Field(default="", description="What function this stage serves.")
+
+
+@function_tool(timeout=30)
+async def register_architecture(
+    ctx: RunContextWrapper,
+    hops: list[ArchitectureHop],
+    target: str = "",
+) -> str:
+    """Register the ordered request path observed during reconnaissance.
+
+    Call this after mapping how a request traverses processing stages
+    from the outermost entry point to the final handler.  Pass the
+    stages in order, front-most first.
+
+    Each hop has:
+
+    - ``name`` (required): a short label for this processing stage.
+    - ``role`` (optional): what function this stage serves.
+
+    Example (generic — use whatever labels match what you observe)::
+
+        hops=[
+            {"name": "<front>", "role": "entry point"},
+            {"name": "<middle>", "role": "routing / rewriting"},
+            {"name": "<back>", "role": "application handler"},
+        ]
+
+    Depth (the number of processing stages) is derived from the hop
+    count.  A depth greater than 1 means the request passes through
+    multiple stages in sequence, which widens the boundary attack
+    surface.
+
+    Args:
+        hops: Ordered list of processing stages, front-most first.
+        target: The target this architecture was observed on.  If
+            omitted and the scan has a single target, that target is
+            used.
+    """
+    return json.dumps(
+        await asyncio.to_thread(
+            _register_architecture_impl,
+            target,
+            hops=[h.model_dump() for h in (hops or [])],
             scan_targets=_scan_targets(ctx),
         ),
         ensure_ascii=False,

@@ -52,6 +52,7 @@ _store_path: Path | None = None
 
 _REQUIRED_SECTIONS = (
     "overview",
+    "architecture",
     "trust boundaries",
     "attack surface",
     "severity calibration",
@@ -59,6 +60,12 @@ _REQUIRED_SECTIONS = (
 
 _SECTION_ALIASES = {
     "overview": ("overview",),
+    "architecture": (
+        "architecture",
+        "request path",
+        "processing stages",
+        "request architecture",
+    ),
     "trust boundaries": ("trust boundaries", "trust boundary"),
     "attack surface": ("attack surface", "attacker stories"),
     "severity calibration": (
@@ -379,9 +386,9 @@ def _save_impl(
             "success": False,
             "error": (
                 "Threat model is missing required section(s): "
-                f"{', '.join(missing)}. Cover Overview, Trust Boundaries and "
-                "Assumptions, Attack Surface and Attacker Stories, and Severity "
-                "Calibration."
+                f"{', '.join(missing)}. Cover Overview, Architecture / "
+                "Request Path, Trust Boundaries and Assumptions, Attack "
+                "Surface and Attacker Stories, and Severity Calibration."
             ),
         }
 
@@ -581,6 +588,12 @@ async def save_threat_model(ctx: RunContextWrapper, target: str, content: str) -
     - **Overview** — what the target actually is, its real-world usage,
       and which parts are product/runtime versus tooling or
       non-production.
+    - **Architecture / Request Path** — the ordered sequence of
+      processing stages a request traverses, front-most entry point
+      first.  Name each stage and its role.  Multi-stage paths (depth
+      greater than 1) widen the boundary attack surface because each
+      transition is a point where different parsers, normalizers, or
+      policy engines may disagree.
     - **Trust Boundaries and Assumptions** — the boundaries, the actors
       on either side, and the invariants that must hold. Separate
       attacker-controlled, operator-controlled, and
