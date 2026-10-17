@@ -151,9 +151,10 @@ For ASN-owned ranges, sweep IPs directly with `naabu`/`httpx` and read served ce
    - If uncertain which of two observed stages is the edge, probe: the one that answers a malformed request with its own error page (rather than forwarding it) is closer to the client.
 
    Use short, neutral labels derived from what was observed (e.g. edge proxy → app server → backend as a format illustration). An unidentified front stage can be labeled descriptively (``"name": "reverse-proxy"``, ``"name": "load-balancer"``). Only register what is actually observed — evidence, not guesses.
-5. **Classify** assets by function from title/tech/path signals: app, API, marketing, auth, CI/CD, observability, storage, admin, VCS, mail. Cluster by role, not by a specific product.
-6. **Port sweep** interesting hosts with `naabu` for non-HTTP services (DBs, caches, brokers, mgmt ports).
-7. **Prioritize** by exposure and value, then hand each finding to the right specialist skill:
+5. **Compose candidate paths** — when probing or enumeration reveals a route template (a path with a variable segment) together with concrete values for that segment observed in responses, instantiate the template with each observed value and record the composed paths in the threat model (under a **Candidate Paths** subsection) and as a findings-category note. This step is conditional on observing both a template and concrete values; instantiate only what was actually seen.
+6. **Classify** assets by function from title/tech/path signals: app, API, marketing, auth, CI/CD, observability, storage, admin, VCS, mail. Cluster by role, not by a specific product.
+7. **Port sweep** interesting hosts with `naabu` for non-HTTP services (DBs, caches, brokers, mgmt ports).
+8. **Prioritize** by exposure and value, then hand each finding to the right specialist skill:
    - Exposed dashboards / debug / observability / metadata leaks → `information_disclosure`
    - Login/admin panels with default or weak creds → `weak_password_detection`
    - Dangling DNS / unclaimed provider resources → `subdomain_takeover`

@@ -71,6 +71,13 @@ multi-page and multi-service applications.
   class, scope it to every enumerated surface for that class, not the obvious
   entrypoints — the enumerated route/parameter catalog from
   `application_enumeration` is the input, not the landing page.
+- **Consume composed candidate paths.** Recon's composed candidate paths — the
+  instantiated route templates recorded in the threat model's **Candidate Paths**
+  subsection and in findings-category notes — are direct probe targets. Hand them
+  to hunters as concrete paths to test, not as patterns to re-derive. If recon
+  reported a route template with observed values but did not compose candidate
+  paths from them, treat the handoff as incomplete and have it completed before
+  scoping hunters.
 - **Scope chain-aware hunters for internal services.** When recon reveals a
   multi-service architecture where an internal service is reachable only via SSRF
   or command execution from a public-facing one, scope a hunter that starts at

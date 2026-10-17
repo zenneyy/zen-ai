@@ -183,6 +183,17 @@ secretfinder -i <target> -o cli
 
 Look for `.js.map` files (above) and Vite/Webpack build info (`__webpack_require__` chunk lists, `manifest.json`) that leak internal structure. This is detection only; load `information_disclosure` for the reconstruction and impact workflow.
 
+### Candidate Path Composition
+
+When enumeration observes a route or endpoint template — a path containing a segment that varies across responses — together with concrete names or values for that variable segment that appeared in index pages, directory listings, or other enumeration responses, compose the full candidate paths by instantiating the template with each observed value. This is a synthesis step: produce the actual paths, do not merely describe the pattern. Instantiate only values that were actually observed in responses — never invent, guess, or special-case any particular value. The composed set stays bounded to what enumeration actually returned.
+
+Record the composed candidate paths in two places so they reach the root agent's scoping decisions:
+
+1. **Threat model** — add a clearly labeled **Candidate Paths** subsection to the threat model body (via `save_threat_model` or `amend_threat_model`), listing each composed path.
+2. **Findings note** — create a note with category `findings` (via `create_note`) containing the same composed paths, so they surface in `list_notes` / `get_note` queries.
+
+This step is conditional: it fires only when both a route template and concrete values for its variable segment have been observed. If no such template-plus-observed-values situation exists on this target, emit nothing.
+
 ## Completeness Criteria
 
 Recon is done only when all of the following hold:
@@ -193,6 +204,7 @@ Recon is done only when all of the following hold:
 - If source is available, every `docker-compose.yml`, `kubernetes/**`, and `helm/**` manifest has been parsed for services and ports
 - Internal service ports have been catalogued as SSRF-chain candidates
 - Route enumeration has **plateaued** — another discovery pass yields no new endpoints
+- If route or endpoint templates with variable segments were observed alongside concrete values for those segments in enumeration responses, candidate paths have been composed and recorded in the threat model and as a findings-category note (see Candidate Path Composition above)
 
 Only then should hunter agents be scoped. The orchestration side of this bar is in `root_agent`.
 
