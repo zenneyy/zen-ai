@@ -150,7 +150,12 @@ def outcome_counts() -> dict[str, int]:
 
 
 def _validate(
-    *, surface: str, risk_area: str, outcome: str, evidence: str
+    *,
+    surface: str,
+    risk_area: str,
+    outcome: str,
+    evidence: str,
+    approaches_tried: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     errors: list[str] = []
     if not surface.strip():
@@ -160,11 +165,21 @@ def _validate(
     normalized = outcome.strip().lower().replace("-", "_").replace(" ", "_")
     if normalized not in VALID_OUTCOMES:
         errors.append(f"Invalid outcome: {outcome!r}. Must be one of: {list(VALID_OUTCOMES)}")
-    elif normalized in _OUTCOMES_REQUIRING_EVIDENCE and not evidence.strip():
-        errors.append(
-            f"evidence is required for outcome '{normalized}' - name the specific control, "
-            "the reason it does not apply, or what is still missing"
-        )
+    else:
+        if normalized in _OUTCOMES_REQUIRING_EVIDENCE and not evidence.strip():
+            errors.append(
+                f"evidence is required for outcome '{normalized}' - name the specific control, "
+                "the reason it does not apply, or what is still missing"
+            )
+        if normalized == "ruled_out" and not (
+            approaches_tried and any(a.strip() for a in approaches_tried)
+        ):
+            errors.append(
+                "outcome 'ruled_out' requires approaches_tried — a non-empty list of the "
+                "discrete approaches actually attempted against this surface. Supply the "
+                "approaches you tried, or use 'needs_follow_up' if the approach-space was "
+                "not substantively covered."
+            )
     return normalized, errors
 
 
@@ -196,9 +211,11 @@ def _record_impl(
     evidence: str,
     agent_id: str | None,
     agent_name: str | None,
+    approaches_tried: list[str] | None = None,
 ) -> dict[str, Any]:
     normalized, errors = _validate(
-        surface=surface, risk_area=risk_area, outcome=outcome, evidence=evidence
+        surface=surface, risk_area=risk_area, outcome=outcome, evidence=evidence,
+        approaches_tried=approaches_tried,
     )
     if errors:
         return {"success": False, "error": "Validation failed", "errors": errors}
@@ -211,6 +228,9 @@ def _record_impl(
     }
     if evidence.strip():
         entry["evidence"] = evidence.strip()
+    cleaned_approaches = [a.strip() for a in (approaches_tried or []) if a.strip()]
+    if cleaned_approaches:
+        entry["approaches_tried"] = cleaned_approaches
     if agent_id:
         entry["agent_id"] = agent_id
     if agent_name:
@@ -263,6 +283,7 @@ def _update_impl(
     evidence: str,
     agent_id: str | None,
     agent_name: str | None,
+    approaches_tried: list[str] | None = None,
 ) -> dict[str, Any]:
     key = (entry_id or "").strip()
     with _coverage_lock:
@@ -278,7 +299,8 @@ def _update_impl(
         surface = str(existing.get("surface", ""))
         risk_area = str(existing.get("risk_area", ""))
         normalized, errors = _validate(
-            surface=surface, risk_area=risk_area, outcome=outcome, evidence=evidence
+            surface=surface, risk_area=risk_area, outcome=outcome, evidence=evidence,
+            approaches_tried=approaches_tried,
         )
         if errors:
             return {"success": False, "error": "Validation failed", "errors": errors}
@@ -290,6 +312,8 @@ def _update_impl(
         }
         if existing.get("evidence"):
             superseded["evidence"] = existing["evidence"]
+        if existing.get("approaches_tried"):
+            superseded["approaches_tried"] = existing["approaches_tried"]
         if existing.get("agent_name"):
             superseded["agent_name"] = existing["agent_name"]
         history = existing.get("history")
@@ -299,6 +323,11 @@ def _update_impl(
         existing["updated_at"] = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
         if evidence.strip():
             existing["evidence"] = evidence.strip()
+        cleaned_approaches = [a.strip() for a in (approaches_tried or []) if a.strip()]
+        if cleaned_approaches:
+            existing["approaches_tried"] = cleaned_approaches
+        else:
+            existing.pop("approaches_tried", None)
         if agent_id:
             existing["agent_id"] = agent_id
         if agent_name:
@@ -355,6 +384,9 @@ def _list_impl(
                 if len(evidence) > _EVIDENCE_PREVIEW_CHARS
                 else evidence
             )
+        approaches = entry.get("approaches_tried")
+        if isinstance(approaches, list) and approaches:
+            listing["approaches_tried"] = approaches
         agent_name = entry.get("agent_name")
         if agent_name:
             listing["agent_name"] = agent_name
@@ -381,6 +413,7 @@ async def record_coverage(
     risk_area: str,
     outcome: str,
     evidence: str = "",
+    approaches_tried: list[str] | None = None,
 ) -> str:
     """Record that you reviewed a surface, and how that review closed.
 
@@ -409,6 +442,9 @@ async def record_coverage(
     - ``ruled_out`` — you had a specific candidate and disproved it. The
       ``evidence`` must name the control that makes it safe, at a
       location, and confirm it runs on every attacker-reachable path.
+      ``approaches_tried`` must list the approaches you exercised —
+      an empty or missing list means the approach-space was not
+      covered, and ``needs_follow_up`` is the right outcome instead.
       "It looked fine" is not ``ruled_out``.
     - ``not_applicable`` — this risk cannot apply here (e.g. no XML
       parsing on a surface, so no XXE). Say why in ``evidence``.
@@ -435,6 +471,12 @@ async def record_coverage(
             ``not_applicable``, and ``needs_follow_up``; recommended
             otherwise. Keep it to a sentence or two — name the control,
             the test performed, or the missing piece.
+        approaches_tried: What you actually attempted — a list of short
+            labels naming each discrete approach exercised against this
+            surface. Required when ``outcome`` is ``ruled_out``;
+            recommended for other outcomes. The entries are opaque
+            labels — name each approach however makes sense for the
+            work you did.
     """
     agent_id, agent_name = _caller_identity(ctx)
     result = await asyncio.to_thread(
@@ -445,6 +487,7 @@ async def record_coverage(
         evidence=evidence,
         agent_id=agent_id,
         agent_name=agent_name,
+        approaches_tried=approaches_tried,
     )
     return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -455,6 +498,7 @@ async def update_coverage(
     entry_id: str,
     outcome: str,
     evidence: str = "",
+    approaches_tried: list[str] | None = None,
 ) -> str:
     """Change how an already-recorded surface closed.
 
@@ -490,6 +534,10 @@ async def update_coverage(
             ``not_applicable``, and ``needs_follow_up``. Say what
             changed, not just what you concluded — the reader needs to
             know why this closed differently the second time.
+        approaches_tried: What you actually attempted — a list of short
+            labels naming each discrete approach exercised. Required
+            when ``outcome`` is ``ruled_out``; recommended for other
+            outcomes. The previous value, if any, is kept as history.
     """
     agent_id, agent_name = _caller_identity(ctx)
     result = await asyncio.to_thread(
@@ -499,6 +547,7 @@ async def update_coverage(
         evidence=evidence,
         agent_id=agent_id,
         agent_name=agent_name,
+        approaches_tried=approaches_tried,
     )
     return json.dumps(result, ensure_ascii=False, default=str)
 

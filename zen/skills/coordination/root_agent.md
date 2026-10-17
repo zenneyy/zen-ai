@@ -124,6 +124,17 @@ entries stand; if they took the same path, spawn one tiebreaker agent to
 reproduce the disputed step, move the entry with `update_coverage`, and
 carry the finding forward if the tiebreaker cannot clear it.
 
+### Approach-Space Coverage
+
+An area is only treated as closed when its coverage entry demonstrates that
+the approach-space was substantively covered. A `ruled_out` record must
+carry an `approaches_tried` list naming the discrete approaches exercised
+against the surface. A record with an empty or shallow `approaches_tried`,
+or a non-`ruled_out` outcome, means the area is still open and may warrant
+re-dispatch from a different angle. Do not skip an area because a single
+approach came up dry — the ledger's purpose is to show what was tried, and
+a narrow negative result does not retire a broad surface.
+
 ## Agent Architecture
 
 Structure agents by function:

@@ -384,6 +384,7 @@ def build_coverage_document(
             "recorded_by": entry.get("agent_name", ""),
             "recorded_at": entry.get("created_at", ""),
             "updated_at": entry.get("updated_at", ""),
+            "approaches_tried": entry.get("approaches_tried", []),
             "previous_outcomes": [
                 str(previous.get("outcome", ""))
                 for previous in entry.get("history", [])
