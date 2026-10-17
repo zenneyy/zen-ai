@@ -139,9 +139,18 @@ For ASN-owned ranges, sweep IPs directly with `naabu`/`httpx` and read served ce
    - Note conflicting or layered technology signals generally (front-of-path header disagreeing with application-level behavior).
    - If a port accepts a TCP connection but HTTP requests to it stall or time out, that transport-layer/application-layer divergence is evidence of a front stage (the connection acceptor) with a separate, unresponsive backend — record it as a multi-stage signal rather than treating the endpoint as simply down.
 
-   When evidence shows more than one processing stage, call ``register_architecture`` with the stages as an ordered list, front-most first:
-   ``register_architecture(hops=[{"name": "<front-label>", "role": "<observed function>"}, {"name": "<back-label>", "role": "application handler"}], target="<target>")``
-   Use short, neutral labels derived from what was observed — an unidentified front stage can be labeled descriptively (e.g. ``"name": "reverse-proxy"``, ``"name": "load-balancer"``). Order matters: front → back. This is what makes multi-stage boundary playbooks load for later specialists. Only register what is actually observed — evidence, not guesses.
+   When evidence shows more than one processing stage, call ``register_architecture`` with the stages in true request-path order, front-to-back:
+   ``register_architecture(hops=[{"name": "<edge-label>", "role": "<observed function>"}, ..., {"name": "<backend-label>", "role": "application handler"}], target="<target>")``
+
+   **Hop ordering is critical.** The FIRST hop must be the component that terminates the client's TCP connection — the edge/outermost proxy the client reaches first. The LAST hop is the final backend that produces the application response. Intermediate stages go between them in the order a request traverses them. Downstream analysis (desync, forwarding, parser-differential testing) depends on knowing which parser is first in the chain; a misordered list misdirects that analysis.
+
+   **Determine edge vs. interior from evidence, not assumption:**
+   - Which component answers the external port first (connection behavior, initial handshake)?
+   - ``Server`` and ``Via`` headers: the outermost value in ``Via`` is the first hop; a ``Server`` header that disagrees with the detected application framework indicates a front stage.
+   - Duplicate or layered headers (multiple ``Server`` values, multiple ``X-Powered-By`` values) — each distinct value is evidence of a stage; order them by which appears to wrap the other.
+   - If uncertain which of two observed stages is the edge, probe: the one that answers a malformed request with its own error page (rather than forwarding it) is closer to the client.
+
+   Use short, neutral labels derived from what was observed (e.g. edge proxy → app server → backend as a format illustration). An unidentified front stage can be labeled descriptively (``"name": "reverse-proxy"``, ``"name": "load-balancer"``). Only register what is actually observed — evidence, not guesses.
 5. **Classify** assets by function from title/tech/path signals: app, API, marketing, auth, CI/CD, observability, storage, admin, VCS, mail. Cluster by role, not by a specific product.
 6. **Port sweep** interesting hosts with `naabu` for non-HTTP services (DBs, caches, brokers, mgmt ports).
 7. **Prioritize** by exposure and value, then hand each finding to the right specialist skill:

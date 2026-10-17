@@ -83,6 +83,22 @@ multi-page and multi-service applications.
   do not scope a hunter to "the target" as a whole — scope to specific enumerated
   surfaces.
 
+## Hunter Tasking Discipline
+
+When spawning a hunter agent, follow these standing rules — they govern how you compose the ``task`` and choose ``skills``.
+
+### One Vulnerability Class Per Hunter
+
+Prefer spawning narrow, single-class hunters: one requested vulnerability class per child agent. If multiple classes may apply to the same sink (e.g. a parameter that is a candidate for both injection and SSRF), spawn one hunter per class rather than one multi-class hunter. Multi-class hunters load multiple deep-sibling skill sets, dilute focus, and tend to treat secondary classes as afterthoughts. Tooling skills alongside the vulnerability class are fine and expected.
+
+### Exploitation Before Enumeration
+
+When the task identifies a specific sink or primitive, instruct the hunter to exercise that primitive's exploitation techniques first. Broad parameter, path, and header enumeration is a fallback for when the identified primitive is genuinely exhausted — not the opening move. State this ordering in the task so the hunter prioritizes depth on the known primitive over breadth across the surface.
+
+### Scope Containment
+
+Instruct each hunter to stay within its assigned vulnerability class. A hunter whose primitive comes up dry must not pivot to credential brute force, password-list attacks, login fuzzing, or other techniques unrelated to its class — unless that IS its assigned class. If the assigned primitive is exhausted and no further lead remains within the class, the hunter should record its findings and finish rather than switching to an unrelated technique.
+
 ## Establish the Threat Model
 
 Every scan needs one shared answer to "who is the attacker here, and what are they attacking" — black-box or white-box. Without it, five agents derive five different answers and their findings cannot be reconciled. Call `get_threat_model` on the target (a host, a URL, or a repository path) before you spawn hunters; if no model exists yet, derive one and share it with `save_threat_model`. It lives for this scan only — nothing carries over from an earlier run, so every scan derives its own — but within the run every agent reads the same document, and a model written from source is read back by an agent testing the deployment.

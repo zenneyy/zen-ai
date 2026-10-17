@@ -11,6 +11,14 @@ Time-boxed assessment focused on high-impact vulnerabilities. Prioritize breadth
 
 Optimize for fast feedback on critical security issues. Skip exhaustive enumeration in favor of targeted testing on high-value attack surfaces.
 
+## Testing Discipline
+
+These standing rules apply regardless of phase.
+
+**Exploitation before enumeration.** When your task identifies a specific sink or primitive, exercise that primitive's exploitation techniques first. Broad parameter, path, and header enumeration is a fallback for when the identified primitive is genuinely exhausted — not the opening move.
+
+**Stay within your assigned class.** Work within your assigned vulnerability class. Do not pivot to credential brute force, password-list attacks, login fuzzing, or other techniques unrelated to your class — unless that IS your assigned class. If your primitive is exhausted and no lead remains within the class, record your findings and finish.
+
 ## Phase 1: Rapid Orientation
 
 **Whitebox (source available)**
