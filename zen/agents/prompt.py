@@ -118,14 +118,22 @@ def _resolve_skills(
         ordered.append("analysis/source_aware_discovery")
         ordered.append("analysis/fix_verification")
 
-    if scan_mode == "deep":
-        ordered.extend(get_detected_skill_slugs(scan_targets))
+    # Detected-stack framework slugs (get_detected_skill_slugs) are no longer
+    # auto-injected; root passes them explicitly via create_agent's requested
+    # list when relevant.  The store and helpers remain for that reactive path.
 
     if scan_mode == "deep" and max_architecture_depth(scan_targets) > 1:
         arch_gated = ["vulnerabilities/http_request_smuggling"]
-        ordered.extend(arch_gated)
-        ordered.extend(find_deep_siblings(arch_gated))
-        ordered.extend(find_related_skills(arch_gated))
+        requested_set = set(requested or [])
+        if requested_set & set(arch_gated):
+            ordered.extend(arch_gated)
+            ordered.extend(find_deep_siblings(arch_gated))
+            ordered.extend(find_related_skills(arch_gated))
+        else:
+            logger.debug(
+                "arch_gate: depth>1 but %s not in requested; skipping injection",
+                arch_gated,
+            )
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -182,6 +190,22 @@ def render_system_prompt(
         logger.exception("render_system_prompt failed; returning empty prompt")
         return ""
     else:
+        # Per-skill byte-offset trace: cumulative char counts over the loaded
+        # skill bodies (same strings substituted into the rendered prompt, so
+        # units match prompt_len). Pure measurement — never alters ordering or
+        # the rendered output.
+        if skill_content:
+            _offset = 0
+            _parts: list[str] = []
+            for _slug, _body in skill_content.items():
+                _blen = len(_body)
+                _parts.append(f"{_slug}@{_offset}(+{_blen})")
+                _offset += _blen
+            logger.debug(
+                "skill_offsets: total=%d [%s]",
+                _offset,
+                ", ".join(_parts),
+            )
         logger.debug(
             "render_system_prompt: scan_mode=%s root=%s whitebox=%s skills=%d prompt_len=%d",
             scan_mode,

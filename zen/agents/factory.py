@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from zen.agents.prompt import render_system_prompt
 from zen.config import load_settings
+from zen.llm.request_log import current_call_context
 from zen.tools.agents_graph.tools import (
     agent_finish,
     create_agent,
@@ -446,7 +447,11 @@ def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
                 parsed["shell"] = "bash"
             _apply_shell_output_cap(parsed)
             raw_input = json.dumps(parsed)
-            logger.info("agent command: %s", parsed.get("cmd", raw_input))
+            logger.info(
+                "agent command: agent=%s %s",
+                current_call_context().agent_id or "-",
+                parsed.get("cmd", raw_input),
+            )
         try:
             return await invoke_tool(ctx, raw_input)
         except ValidationError as exc:
