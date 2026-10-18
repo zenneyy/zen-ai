@@ -170,6 +170,8 @@ grep -RhnE 'ClusterIP|LoadBalancer|NodePort|containerPort|- port:' kubernetes/ k
 3306 5432 6379 9200 27017 2375 8080 8081 8443 9090
 ```
 
+Every internal or backend service that responds is itself a reconnaissance target. Apply the same route and endpoint discovery passes used on the edge application — content and directory discovery, parsing of index and listing responses, parameter discovery, and route-template extraction — to that service's namespace, through whatever view reaches it (an SSRF primitive, an internal network link, a hostname that resolves internally, discovered credentials, or any other path), to the same depth as the edge application.
+
 Every internal-only service becomes an SSRF-chain candidate — load `ssrf` for the chain primitives.
 
 ### JavaScript Static Analysis for Secrets
@@ -185,7 +187,7 @@ Look for `.js.map` files (above) and Vite/Webpack build info (`__webpack_require
 
 ### Candidate Path Composition
 
-When enumeration observes a route or endpoint template — a path containing a segment that varies across responses — together with concrete names or values for that variable segment that appeared in index pages, directory listings, or other enumeration responses, compose the full candidate paths by instantiating the template with each observed value. This is a synthesis step: produce the actual paths, do not merely describe the pattern. Instantiate only values that were actually observed in responses — never invent, guess, or special-case any particular value. The composed set stays bounded to what enumeration actually returned.
+When enumeration observes a route or endpoint template — a path containing a segment that varies across responses — together with concrete names or values for that variable segment that appeared in index pages, directory listings, or other enumeration responses — whether from the edge application or from any internal or backend service that has been enumerated, compose the full candidate paths by instantiating the template with each observed value. This is a synthesis step: produce the actual paths, do not merely describe the pattern. Instantiate only values that were actually observed in responses — never invent, guess, or special-case any particular value. The composed set stays bounded to what enumeration actually returned.
 
 Record the composed candidate paths in two places so they reach the root agent's scoping decisions:
 
@@ -203,6 +205,7 @@ Recon is done only when all of the following hold:
 - If authentication is available, the authenticated surface has been re-enumerated for **each** accessible role
 - If source is available, every `docker-compose.yml`, `kubernetes/**`, and `helm/**` manifest has been parsed for services and ports
 - Internal service ports have been catalogued as SSRF-chain candidates
+- Every internal or backend service reached during enumeration has had its route surface enumerated to the same depth as the edge application, and any route templates observed on those services have been composed with their observed values and recorded as candidate paths
 - Route enumeration has **plateaued** — another discovery pass yields no new endpoints
 - If route or endpoint templates with variable segments were observed alongside concrete values for those segments in enumeration responses, candidate paths have been composed and recorded in the threat model and as a findings-category note (see Candidate Path Composition above)
 
