@@ -84,6 +84,14 @@ multi-page and multi-service applications.
   the public surface and treats each internal service as a post-exploitation
   target. Load `ssrf` for the chain primitives and `rce` for post-exploitation
   reconnaissance of internal services.
+- **Derive attack classes from the documented architecture, not only from
+  application-surface findings.** The structure of the system — its stages,
+  boundaries, and the way components process and pass requests between them —
+  implies attack classes in its own right. When ranking attacker stories, enter
+  every class implied by the architecture into the ranking and weight it on its
+  merits alongside surface-derived findings. A class that never enters the
+  ranking cannot be prioritized, regardless of how clearly the architecture
+  suggests it.
 - **Do not** spawn IDOR/BFLA/mass-assignment hunters scoped only to top-level
   authenticated endpoints while the per-role authenticated surface is still
   un-enumerated; do not call recon "done" because the landing page was crawled;

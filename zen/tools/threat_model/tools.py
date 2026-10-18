@@ -593,7 +593,9 @@ async def save_threat_model(ctx: RunContextWrapper, target: str, content: str) -
       first.  Name each stage and its role.  Multi-stage paths (depth
       greater than 1) widen the boundary attack surface because each
       transition is a point where different parsers, normalizers, or
-      policy engines may disagree.
+      policy engines may disagree.  After documenting the stages, state
+      which attack classes the architecture itself implies and carry
+      those forward into the Attack Surface and Attacker Stories ranking.
     - **Trust Boundaries and Assumptions** — the boundaries, the actors
       on either side, and the invariants that must hold. Separate
       attacker-controlled, operator-controlled, and
