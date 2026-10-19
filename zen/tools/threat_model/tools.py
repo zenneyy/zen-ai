@@ -351,6 +351,55 @@ def _get_impl(target: str, scan_targets: list[str] | None = None) -> dict[str, A
     return result
 
 
+_INFRASTRUCTURE_KEYWORDS: frozenset[str] = frozenset({
+    "load balancer",
+    "proxy",
+    "gateway",
+    "cache",
+    "waf",
+    "firewall",
+    "cdn",
+    "content delivery",
+    "entry point",
+    "tls terminat",
+    "ssl terminat",
+})
+
+
+def _is_enumerable_backend(hop: dict[str, str]) -> bool:
+    """True when a hop is plausibly a distinct backend application
+    with its own route surface that edge-targeted discovery would
+    not cover.  Infrastructure and the primary application are
+    excluded."""
+    combined = f"{hop.get('name', '')} {hop.get('role', '')}".lower()
+    if any(term in combined for term in _INFRASTRUCTURE_KEYWORDS):
+        return False
+    if "web application" in combined or "application server" in combined:
+        if "backend" not in combined:
+            return False
+    return True
+
+
+def _unenumerated_indirect_services() -> list[str]:
+    """Return names of indirectly-reached services with no discovery pass logged."""
+    from zen.tools.command_log.tools import has_discovery_command
+    from zen.tools.detected_stack.tools import (
+        _DETECTED_ARCHITECTURE,
+        _store_lock as _arch_lock,
+    )
+
+    missing: list[str] = []
+    with _arch_lock:
+        for hops in _DETECTED_ARCHITECTURE.values():
+            for hop in hops[1:]:
+                if not _is_enumerable_backend(hop):
+                    continue
+                name = (hop.get("name") or "").strip()
+                if name and not has_discovery_command(name):
+                    missing.append(name)
+    return missing
+
+
 def _save_impl(
     target: str,
     content: str,
@@ -389,6 +438,27 @@ def _save_impl(
                 f"{', '.join(missing)}. Cover Overview, Architecture / "
                 "Request Path, Trust Boundaries and Assumptions, Attack "
                 "Surface and Attacker Stories, and Severity Calibration."
+            ),
+        }
+
+    unenumerated = _unenumerated_indirect_services()
+    if unenumerated:
+        logger.debug(
+            "threat_model rejected — indirectly-reached services without "
+            "a discovery pass: %s",
+            unenumerated,
+        )
+        return {
+            "success": False,
+            "error": (
+                "An indirectly-reached service was recorded during "
+                "reconnaissance but its route surface was never enumerated "
+                "with a discovery pass. Run content or route discovery "
+                "against every service reached indirectly — through a "
+                "server-side request, an internal network link, a redirect "
+                "revealing an internal host, discovered credentials, or "
+                "any other indirect path — before finalizing the threat "
+                "model."
             ),
         }
 
