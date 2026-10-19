@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import pytest
@@ -29,6 +30,11 @@ _MODEL = """# Threat Model
 ## Overview
 A multi-tenant billing API. Product code lives in `api/`; `scripts/` is
 developer-only tooling and is not deployed.
+
+## Architecture
+Requests traverse a reverse proxy at the edge before reaching the application
+server. The proxy terminates TLS and forwards the tenant-scoped session to
+the application layer, which dispatches to per-resource handlers.
 
 ## Trust Boundaries and Assumptions
 Requests arrive from untrusted tenants through `api/router.py`. The tenant id
@@ -161,6 +167,7 @@ def test_rejects_model_missing_required_sections(tmp_path: Path) -> None:
     result = _save_impl(str(repo), thin, None)
 
     assert result["success"] is False
+    assert "missing required section" in result["error"]
     assert "severity calibration" in result["error"]
 
 
@@ -365,3 +372,125 @@ def test_different_repositories_on_one_host_stay_separate(tmp_path: Path) -> Non
     _git(second, "remote", "add", "origin", "git@github.com:acme/payments.git")
 
     assert _get_impl(str(second))["found"] is False
+
+
+# ── discovery gate for indirectly-reached services ──────────────────
+
+
+@pytest.fixture()
+def _isolate_command_and_arch_stores() -> Iterator[None]:
+    """Clear the command log and architecture store for each gate test."""
+    import zen.tools.command_log.tools as cmd_mod
+    import zen.tools.detected_stack.tools as stack_mod
+
+    orig_log = list(cmd_mod._COMMAND_LOG)
+    orig_path = cmd_mod._store_path
+    orig_arch = dict(stack_mod._DETECTED_ARCHITECTURE)
+    orig_arch_path = stack_mod._arch_store_path
+
+    cmd_mod._COMMAND_LOG.clear()
+    cmd_mod._store_path = None
+    stack_mod._DETECTED_ARCHITECTURE.clear()
+    stack_mod._arch_store_path = None
+    try:
+        yield
+    finally:
+        cmd_mod._COMMAND_LOG.clear()
+        cmd_mod._COMMAND_LOG.extend(orig_log)
+        cmd_mod._store_path = orig_path
+        stack_mod._DETECTED_ARCHITECTURE.clear()
+        stack_mod._DETECTED_ARCHITECTURE.update(orig_arch)
+        stack_mod._arch_store_path = orig_arch_path
+
+
+_GATE_MODEL = """\
+# Threat Model
+
+## Overview
+Only the deployed surface is visible; no source. Inferred from recon.
+
+## Architecture
+Requests traverse an edge service before reaching the application handler.
+
+## Trust Boundaries and Assumptions
+Requests arrive from untrusted clients through the edge service. Sessions
+are validated at the edge; the internal backend trusts the forwarded identity.
+
+## Attack Surface and Attacker Stories
+The public-facing edge service and its forwarded requests to the internal
+backend are attacker-reachable. A realistic story is an attacker reaching
+internal endpoints that the edge does not expose directly.
+
+## Severity Calibration
+Critical: unauthenticated access to internal services. High: data leakage
+across trust boundaries. Medium: verbose errors exposing internals.
+"""
+
+
+def test_gate_rejects_when_indirect_service_has_no_discovery(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    import zen.tools.detected_stack.tools as stack_mod
+
+    stack_mod._register_architecture_impl(
+        "https://app.example.com",
+        hops=[
+            {"name": "edge-service", "role": "entry point"},
+            {"name": "internal-backend", "role": "application handler"},
+        ],
+        scan_targets=["https://app.example.com"],
+    )
+
+    result = _save_impl(
+        "https://app.example.com", _GATE_MODEL, "root",
+        scan_targets=["https://app.example.com"],
+    )
+
+    assert result["success"] is False
+    assert "indirectly-reached service" in result["error"]
+
+
+def test_gate_passes_when_discovery_command_was_run(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    import zen.tools.command_log.tools as cmd_mod
+    import zen.tools.detected_stack.tools as stack_mod
+
+    stack_mod._register_architecture_impl(
+        "https://app.example.com",
+        hops=[
+            {"name": "edge-service", "role": "entry point"},
+            {"name": "internal-backend", "role": "application handler"},
+        ],
+        scan_targets=["https://app.example.com"],
+    )
+    cmd_mod.record_command(
+        "feroxbuster -u http://internal-backend:8080 "
+        "-w /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
+    )
+
+    result = _save_impl(
+        "https://app.example.com", _GATE_MODEL, "root",
+        scan_targets=["https://app.example.com"],
+    )
+
+    assert result["success"] is True
+
+
+def test_gate_ignores_single_hop_architecture(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    import zen.tools.detected_stack.tools as stack_mod
+
+    stack_mod._register_architecture_impl(
+        "https://app.example.com",
+        hops=[{"name": "only-service", "role": "standalone"}],
+        scan_targets=["https://app.example.com"],
+    )
+
+    result = _save_impl(
+        "https://app.example.com", _GATE_MODEL, "root",
+        scan_targets=["https://app.example.com"],
+    )
+
+    assert result["success"] is True
