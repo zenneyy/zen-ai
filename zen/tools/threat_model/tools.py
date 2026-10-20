@@ -54,7 +54,8 @@ _REQUIRED_SECTIONS = (
     "overview",
     "architecture",
     "trust boundaries",
-    "attack surface",
+    "observations",
+    "hypotheses",
     "severity calibration",
 )
 
@@ -67,7 +68,16 @@ _SECTION_ALIASES = {
         "request architecture",
     ),
     "trust boundaries": ("trust boundaries", "trust boundary"),
-    "attack surface": ("attack surface", "attacker stories"),
+    "observations": (
+        "observations",
+        "attack surface",
+        "observed attack surface",
+    ),
+    "hypotheses": (
+        "hypotheses",
+        "attacker hypotheses",
+        "hypothesized vulnerabilities",
+    ),
     "severity calibration": (
         "severity calibration",
         "severity",
@@ -436,8 +446,10 @@ def _save_impl(
             "error": (
                 "Threat model is missing required section(s): "
                 f"{', '.join(missing)}. Cover Overview, Architecture / "
-                "Request Path, Trust Boundaries and Assumptions, Attack "
-                "Surface and Attacker Stories, and Severity Calibration."
+                "Request Path, Trust Boundaries and Assumptions, "
+                "Observations (attack surface evidence), Hypotheses "
+                "(suspected weaknesses with basis), and Severity "
+                "Calibration."
             ),
         }
 
@@ -665,18 +677,33 @@ async def save_threat_model(ctx: RunContextWrapper, target: str, content: str) -
       transition is a point where different parsers, normalizers, or
       policy engines may disagree.  After documenting the stages, state
       which attack classes the architecture itself implies and carry
-      those forward into the Attack Surface and Attacker Stories ranking.
+      those into the Hypotheses section as architecture-grounded
+      hypotheses.
     - **Trust Boundaries and Assumptions** — the boundaries, the actors
       on either side, and the invariants that must hold. Separate
       attacker-controlled, operator-controlled, and
       developer-controlled inputs explicitly. Black-box, this is the
       role, tenant, and privilege model: who can reach what before
       authenticating, as a low-privilege user, and across tenants.
-    - **Attack Surface and Attacker Stories** — the exposed surfaces
+    - **Observations** — what was actually seen: the exposed surfaces
       (hosts, endpoints, parameters, integrations, or the code-level
       entrypoints and sinks), the mitigations already present that
-      materially change severity or reach, realistic attacker stories,
-      and the stories that are *not* realistic here and why.
+      materially change severity or reach, and the technology and
+      configuration facts established by probing or reading source.
+      Every claim here should be something you observed or verified,
+      not something you suspect. This section is the evidence base
+      the rest of the model builds on.
+    - **Hypotheses** — what the writer suspects may be exploitable
+      but has not yet verified.  Each hypothesis must state its
+      **basis**: either *grounded* (derived from a specific
+      observation in the Observations section — name it) or
+      *assumed* (a reasonable suspicion not yet backed by a direct
+      observation).  Include the attack classes the architecture
+      implies, hypotheses about which surfaces are most exposed,
+      and scenarios that are *not* realistic here and why.  Do not
+      rank or sequence hypotheses into an attack plan — report
+      them as a set, each with its basis, so the consuming agent
+      can form its own priorities from the evidence.
     - **Severity Calibration** — what critical / high / medium / low
       look like for *this* target, with a concrete example at each
       level. Where a vulnerability class needs attacker control that

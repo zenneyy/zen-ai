@@ -41,10 +41,17 @@ Requests arrive from untrusted tenants through `api/router.py`. The tenant id
 is taken from the signed session, never from the request body. Operators
 configure webhooks; developers control migrations.
 
-## Attack Surface and Attacker Stories
-The public REST surface and the webhook receiver are attacker-reachable. A
-realistic story is a tenant reading another tenant's invoices. Local CLI
-tooling is not a realistic surface.
+## Observations
+The public REST surface and the webhook receiver are attacker-reachable.
+The tenant id is bound to the signed session and is not accepted from
+request parameters. Local CLI tooling is not deployed.
+
+## Hypotheses
+A tenant may be able to read another tenant's invoices by manipulating
+resource identifiers in API calls (grounded: the REST surface accepts
+a resource id path parameter observed during enumeration). Local CLI
+tooling is not a realistic attack surface (assumed: no evidence of
+deployment).
 
 ## Severity Calibration
 Critical: cross-tenant write. High: cross-tenant read. Medium: authenticated
@@ -174,7 +181,7 @@ def test_rejects_model_missing_required_sections(tmp_path: Path) -> None:
 def test_rejects_stub_model(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
 
-    result = _save_impl(str(repo), "overview trust boundaries attack surface", None)
+    result = _save_impl(str(repo), "overview trust boundaries attack surface hypotheses", None)
 
     assert result["success"] is False
     assert "too thin" in result["error"]
@@ -416,10 +423,16 @@ Requests traverse an edge service before reaching the application handler.
 Requests arrive from untrusted clients through the edge service. Sessions
 are validated at the edge; the internal backend trusts the forwarded identity.
 
-## Attack Surface and Attacker Stories
+## Observations
 The public-facing edge service and its forwarded requests to the internal
-backend are attacker-reachable. A realistic story is an attacker reaching
-internal endpoints that the edge does not expose directly.
+backend are attacker-reachable. The edge service terminates TLS and
+forwards tenant-scoped sessions to the backend.
+
+## Hypotheses
+An attacker may reach internal endpoints that the edge does not expose
+directly by targeting the forwarding path (grounded: the multi-hop
+architecture was observed during probing). Verbose error responses from
+the backend may leak internal structure (assumed: not yet observed).
 
 ## Severity Calibration
 Critical: unauthenticated access to internal services. High: data leakage
