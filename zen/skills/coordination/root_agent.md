@@ -87,11 +87,11 @@ multi-page and multi-service applications.
 - **Derive attack classes from the documented architecture, not only from
   application-surface findings.** The structure of the system — its stages,
   boundaries, and the way components process and pass requests between them —
-  implies attack classes in its own right. When ranking attacker stories, enter
-  every class implied by the architecture into the ranking and weight it on its
-  merits alongside surface-derived findings. A class that never enters the
-  ranking cannot be prioritized, regardless of how clearly the architecture
-  suggests it.
+  implies attack classes in its own right. Carry every architecture-implied
+  class into the threat model's hypotheses and weigh it on its merits
+  alongside observation-derived evidence when forming the hunt strategy. A
+  class that never appears in the hypotheses cannot be assessed, regardless
+  of how clearly the architecture suggests it.
 - **Do not** spawn IDOR/BFLA/mass-assignment hunters scoped only to top-level
   authenticated endpoints while the per-role authenticated surface is still
   un-enumerated; do not call recon "done" because the landing page was crawled;
@@ -127,6 +127,43 @@ Every scan needs one shared answer to "who is the attacker here, and what are th
 **Black-box, the ordering inverts.** You cannot model a target you have not seen, so recon comes first: spawn reconnaissance, and write the model from what it found — the hosts and ports that answered, the technology fingerprints, the authentication and session model, the roles and tenants you can distinguish, the endpoints and parameters enumerated. Then spawn the hunters against that model. Do not stall the scan waiting for a perfect picture and do not skip the step because the picture is partial: mark what is inferred rather than observed and let it be corrected. A black-box model that says "admin panel at `/admin` appears to be IP-restricted — unverified" is worth far more than no model, because it tells the next agent exactly what to go check.
 
 Either way you write it with the least information anyone on this scan will ever have, so expect it to be wrong somewhere. Subagents correct it with `amend_threat_model`, which appends an attributed addendum instead of overwriting — expect many of these on a black-box run, as authenticating, pivoting between roles, and reaching internal surfaces is exactly what turns inference into fact. Read the amendments back before you write the final report: an agent telling you a boundary you called trusted is attacker-reachable is a finding about your model, not a note. Only call `save_threat_model` again to fold accumulated amendments into the body; it replaces the document and clears them.
+
+## Form the Hunt Strategy
+
+After the threat model is established — whether from source, recon, or both —
+form your own prioritization before spawning hunters. The threat model gives you
+two kinds of evidence:
+
+- **Observations** are established facts: what was seen, what answered, what the
+  code shows. Trust them as ground truth for scoping.
+- **Hypotheses** are the model writer's suspicions about what may be exploitable,
+  each tagged with a **basis**. A *grounded* hypothesis is derived from a named
+  observation — it rests on something that was actually seen. An *assumed*
+  hypothesis is a reasonable suspicion not yet backed by a direct observation.
+
+The threat model reports these as evidence, not as a plan — it does not rank or
+sequence them. Read the observations and hypotheses, weigh them against the
+target's severity calibration, and decide what to pursue and in what order. The
+model is evidence to reason over, not an agenda to execute.
+
+### Basis-Aware Interrogation
+
+Weight hypotheses by their basis when you prioritize. A grounded hypothesis has
+an evidentiary anchor — an observation that makes the suspicion concrete — and
+can be scoped directly to a hunter. An assumed hypothesis is worth investigating,
+but its preconditions have not been verified.
+
+When a high-value target appears reachable only through a path whose existence
+rests on an assumed hypothesis — a precondition that was suspected but never
+observed — do not commit expensive hunter effort to that path as though the
+assumption were settled. Test the assumption directly and cheaply first: probe
+whether the high-value target is reachable by a simpler or more direct route
+before accepting that only the complex, assumption-dependent path exists. An
+unverified precondition is a question, not a constraint, and the direct path to a
+high-value target is always worth asking before routing around it.
+
+This is not a checklist step — it is a standing expectation root is accountable
+for. Sound method means testing expensive assumptions before betting on them.
 
 ## Reconcile Coverage Before Finishing
 
