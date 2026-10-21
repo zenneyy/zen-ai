@@ -168,6 +168,8 @@ high-value target is always worth asking before routing around it.
 This is not a checklist step — it is a standing expectation root is accountable
 for. Sound method means testing expensive assumptions before betting on them.
 
+When you spawn a subagent, include its role persona in the skills list: `coordination/recon_agent` for reconnaissance agents, `coordination/hunter_agent` for hunters. The persona defines the role's identity and working disciplines; without it the subagent has no stable framing beyond the task string.
+
 ## Reconcile Coverage Before Finishing
 
 Coverage entries are shared and mutable. Before `finish_scan`, list the `needs_follow_up` rows: each one is either work you still owe or a row somebody already resolved without updating. Assign the former to a subagent and have it call `update_coverage` on the existing entry rather than recording a second one — a stale open item sitting next to its own resolution is worse than either alone.
