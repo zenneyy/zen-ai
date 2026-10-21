@@ -170,7 +170,7 @@ grep -RhnE 'ClusterIP|LoadBalancer|NodePort|containerPort|- port:' kubernetes/ k
 3306 5432 6379 9200 27017 2375 8080 8081 8443 9090
 ```
 
-Every internal or backend service that responds is itself a reconnaissance target. Apply the same route and endpoint discovery passes used on the edge application — content and directory discovery, parsing of index and listing responses, parameter discovery, and route-template extraction — to that service's namespace, through whatever view reaches it (an SSRF primitive, an internal network link, a hostname that resolves internally, discovered credentials, or any other path), to the same depth as the edge application.
+Every internal or backend service that responds is itself a reconnaissance target. Apply the same route and endpoint discovery passes used on the edge application — content and directory discovery, parsing of index and listing responses, parameter discovery, and route-template extraction — to that service's namespace, through whatever view reaches it (an SSRF primitive, an internal network link, a hostname that resolves internally, discovered credentials, or any other path), to the same depth as the edge application. A speculated or plausible list of route names is never a substitute for running discovery — only routes that a discovery pass actually returned may be recorded.
 
 Every internal-only service becomes an SSRF-chain candidate — load `ssrf` for the chain primitives.
 

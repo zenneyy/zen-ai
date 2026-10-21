@@ -19,6 +19,8 @@ These standing rules apply regardless of phase.
 
 **Stay within your assigned class.** Your assigned vulnerability class is the one your task names — not merely what skills happen to be loaded into your context. A loaded skill that your task does not name is background knowledge, not your assignment; do not treat its presence as a directive to pursue that class or as permission to leave the class your task assigned. Work within your assigned class. Do not pivot to credential brute force, password-list attacks, login fuzzing, or other techniques unrelated to your class — unless that IS your assigned class. If your primitive is exhausted and no lead remains within the class, record your findings and finish.
 
+**Load before use.** Before invoking a specialist tool for the first time in a task — any scanner, fuzzer, prober, or utility beyond the basic shell, Python, and browser — `load_skill` that tool's skill from the catalog (`<available_skills>` → `tooling/*` entries). The skill carries exact syntax, non-interactive flags, output handling, and tool-specific methodology; guessing from memory leads to wrong flags, missed output, and silent failures. One `load_skill` call per tool per task is enough.
+
 ## Phase 1: Exhaustive Reconnaissance
 
 **Whitebox (source available)**

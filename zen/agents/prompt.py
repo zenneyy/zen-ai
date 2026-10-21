@@ -9,7 +9,6 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from zen.skills import (
     find_deep_siblings,
-    find_related_skills,
     get_available_skills,
     load_skills,
     skill_search_dirs,
@@ -69,28 +68,15 @@ def _resolve_skills(
 
     siblings_added = [s for s in ordered if s not in set(requested or [])]
 
-    pre_related = len(ordered)
-    if requested:
-        ordered.extend(find_related_skills(requested))
-    related_added = ordered[pre_related:]
-
-    tooling_requested = [s for s in (requested or []) if s.startswith("tooling/")]
-    tooling_related = [s for s in related_added if s.startswith("tooling/")]
-
-    if requested or siblings_added or related_added:
+    if requested or siblings_added:
         logger.info(
             "skill_resolve: requested=%s deep_siblings=%s"
-            " tooling_requested=%s tooling_related=%s"
-            " (requested=%d +deep=%d +tooling=%d +rest=%d =%d)",
+            " (requested=%d +deep=%d =%d)",
             list(requested or []),
             siblings_added,
-            tooling_requested,
-            tooling_related,
             len(requested or []),
             len(siblings_added),
-            len(tooling_requested) + len(tooling_related),
-            len(related_added) - len(tooling_related),
-            len(requested or []) + len(siblings_added) + len(related_added),
+            len(requested or []) + len(siblings_added),
         )
 
     ordered.append(f"scan_modes/{scan_mode}")
@@ -128,7 +114,6 @@ def _resolve_skills(
         if requested_set & set(arch_gated):
             ordered.extend(arch_gated)
             ordered.extend(find_deep_siblings(arch_gated))
-            ordered.extend(find_related_skills(arch_gated))
         else:
             logger.debug(
                 "arch_gate: depth>1 but %s not in requested; skipping injection",

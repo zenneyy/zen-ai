@@ -617,7 +617,7 @@ class _Session:
             system_prompt=sp_option,
             mcp_servers={_MCP_SERVER_NAME: server},
             allowed_tools=[f"{_MCP_PREFIX}{(t.get('function') or {}).get('name')}" for t in tools],
-            tools=[],  # suppress Claude Code's own built-ins; Zen supplies the toolset
+            tools=["websearch"],  # suppress Claude Code's own built-ins; Zen supplies the toolset
             setting_sources=None,  # ignore the user's project/user settings
             permission_mode="bypassPermissions",
             include_partial_messages=False,
