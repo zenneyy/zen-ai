@@ -494,6 +494,52 @@ async def wait_for_agents(  # noqa: PLR0911
     )
 
 
+_RECON_PERSONA = "coordination/recon_agent"
+_HUNTER_PERSONA = "coordination/hunter_agent"
+
+
+def _role_persona_for(name: str, skills: list[str]) -> tuple[str | None, str | None]:
+    """Pick the role persona a spawned child should carry, if any.
+
+    The child's ``name`` decides first: a name that says what the agent is
+    (``recon`` / ``hunter``) selects that role's persona. Only when the name is
+    silent does the requested ``skills`` list break the tie, and only when every
+    entry points one way — a list wholly under ``reconnaissance/`` or wholly
+    under ``vulnerabilities/``. A mixed, bare, or empty list yields no persona:
+    an unlabelled agent stays persona-less rather than be guessed at.
+
+    Returns ``(persona, trigger)`` where ``trigger`` names the rule that fired
+    (``"name_match"`` or ``"skill_fallback"``), or ``(None, None)`` when no role
+    could be determined.
+    """
+    lowered = (name or "").lower()
+    if "recon" in lowered:
+        return _RECON_PERSONA, "name_match"
+    if "hunter" in lowered:
+        return _HUNTER_PERSONA, "name_match"
+    if skills and all(s.startswith("reconnaissance/") for s in skills):
+        return _RECON_PERSONA, "skill_fallback"
+    if skills and all(s.startswith("vulnerabilities/") for s in skills):
+        return _HUNTER_PERSONA, "skill_fallback"
+    return None, None
+
+
+def _maybe_attach_role_persona(name: str, skills: list[str]) -> list[str]:
+    """Return ``skills`` with the child's role persona attached when one applies.
+
+    A structural safety net for the prose rule that a spawned role agent should
+    carry its persona: the matching persona is prepended when
+    :func:`_role_persona_for` finds one and it is not already present (dedup, not
+    stacking). A child with no determinable role, or one that already lists its
+    persona, is returned with the same contents. The input list is never
+    mutated.
+    """
+    persona, _ = _role_persona_for(name, skills)
+    if persona is None or persona in skills:
+        return list(skills)
+    return [persona, *skills]
+
+
 @function_tool(timeout=120)
 async def create_agent(
     ctx: RunContextWrapper,
@@ -581,13 +627,22 @@ async def create_agent(
             default=str,
         )
 
+    # Structural backstop for the prose handoff rule in coordination/root_agent:
+    # a recon or hunter child must carry its role persona even when the caller
+    # omits it from the skills list. Attached after validation so it never trips
+    # the user-skill checks or the non-tooling cap — the persona is a structural
+    # role skill, not one of the caller's requested specialties.
+    persona, persona_trigger = _role_persona_for(name, skill_list)
+    persona_root_included = persona is not None and persona in skill_list
+    effective_skills = _maybe_attach_role_persona(name, skill_list)
+
     parent_history = list(ctx.turn_input) if inherit_context and ctx.turn_input else []
     try:
         result = await spawner(
             parent_ctx=inner,
             name=name,
             task=task,
-            skills=skill_list,
+            skills=effective_skills,
             parent_history=parent_history,
         )
     except Exception as e:
@@ -607,6 +662,15 @@ async def create_agent(
         skill_list,
         len(task or ""),
     )
+    if persona is not None:
+        logger.info(
+            "persona_autoattach: child=%s name=%r persona=%s trigger=%s root_included=%s",
+            result.get("agent_id"),
+            name,
+            persona,
+            persona_trigger,
+            persona_root_included,
+        )
 
     return json.dumps(
         result,
