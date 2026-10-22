@@ -390,6 +390,15 @@ def _is_enumerable_backend(hop: dict[str, str]) -> bool:
     return True
 
 
+def _is_infrastructure_hop(hop: dict[str, str]) -> bool:
+    """True when a hop is edge/transport infrastructure (proxy, gateway,
+    load balancer, and the like) rather than an application with its own
+    route surface.  Mirrors the infrastructure check in
+    _is_enumerable_backend, reused here to locate the primary application."""
+    combined = f"{hop.get('name', '')} {hop.get('role', '')}".lower()
+    return any(term in combined for term in _INFRASTRUCTURE_KEYWORDS)
+
+
 def _unenumerated_indirect_services() -> list[str]:
     """Return names of indirectly-reached services with no discovery pass logged."""
     from zen.tools.command_log.tools import has_discovery_command
@@ -401,7 +410,15 @@ def _unenumerated_indirect_services() -> list[str]:
     missing: list[str] = []
     with _arch_lock:
         for hops in _DETECTED_ARCHITECTURE.values():
-            for hop in hops[1:]:
+            # Exempt the primary application (first non-infra hop), per the
+            # _is_enumerable_backend docstring; hops after it stay in scope.
+            primary_index = next(
+                (i for i, hop in enumerate(hops) if not _is_infrastructure_hop(hop)),
+                None,
+            )
+            if primary_index is None:
+                continue
+            for hop in hops[primary_index + 1 :]:
                 if not _is_enumerable_backend(hop):
                     continue
                 name = (hop.get("name") or "").strip()

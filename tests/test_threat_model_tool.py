@@ -445,11 +445,17 @@ def test_gate_rejects_when_indirect_service_has_no_discovery(
 ) -> None:
     import zen.tools.detected_stack.tools as stack_mod
 
+    # Rehomed from the original 2-hop [edge-service, internal-backend] shape:
+    # there, hop[1] was the exempt primary application (edge-targeted discovery
+    # covers its routes), not a genuine indirect backend, so it no longer
+    # exercises the rejection path. internal-backend now sits AFTER the primary
+    # application (app-service), where an unprobed indirect backend is flagged.
     stack_mod._register_architecture_impl(
         "https://app.example.com",
         hops=[
             {"name": "edge-service", "role": "entry point"},
-            {"name": "internal-backend", "role": "application handler"},
+            {"name": "app-service", "role": "application framework"},
+            {"name": "internal-backend", "role": "backend service"},
         ],
         scan_targets=["https://app.example.com"],
     )
@@ -507,3 +513,119 @@ def test_gate_ignores_single_hop_architecture(
     )
 
     assert result["success"] is True
+
+
+# ── primary-application exemption (regression + audit cases) ─────────
+#
+# The discovery gate must exempt the primary application — the first
+# non-infrastructure hop, whose route surface edge-targeted discovery
+# already covers — while still flagging every genuine indirect backend
+# behind it. These pin the four real-world architectures from the ee25
+# audit plus the structural edges, asserting the exact list
+# _unenumerated_indirect_services() returns ([] == the save is accepted).
+
+
+def _flagged(hops: list[dict[str, str]]) -> list[str]:
+    """Register *hops* as the sole architecture and return the gate's flag list."""
+    import zen.tools.detected_stack.tools as stack_mod
+
+    stack_mod._DETECTED_ARCHITECTURE.clear()
+    stack_mod._DETECTED_ARCHITECTURE["https://app.example.com"] = hops
+    return threat_model_tools._unenumerated_indirect_services()
+
+
+def test_primary_app_misclassification_does_not_return(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    """ee25 Arch 2 [apache, flask] (depth 2, empty command log) — and the
+    regression guard for the bug this fix removes.
+
+    apache is the edge reverse proxy; flask is the primary application. The
+    original gate flagged flask because the literal "flask" never appears in
+    the ffuf/curl commands run against the edge URL, which blocked the entire
+    ee25 run. The primary application must now be exempt, so nothing is flagged
+    and the save is accepted.
+    """
+    assert _flagged([
+        {"name": "apache", "role": "reverse proxy"},
+        {"name": "flask", "role": "application framework"},
+    ]) == []
+
+
+def test_gate_flags_backends_after_primary_app_ee25_arch1(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    """ee25 Arch 1 (depth 6, empty command log): flask is exempt as the primary
+    application; the two unprobed backends behind it stay flagged, while the
+    intervening proxies (haproxy, mitmproxy) are infrastructure. flask must NOT
+    appear in the list."""
+    flagged = _flagged([
+        {"name": "apache", "role": "reverse proxy"},
+        {"name": "flask", "role": "application framework"},
+        {"name": "curl-subprocess", "role": "server-side HTTP client"},
+        {"name": "haproxy", "role": "load balancer"},
+        {"name": "mitmproxy", "role": "intercepting proxy"},
+        {"name": "wifi_chipset-backend", "role": "device backend service"},
+    ])
+    assert flagged == ["curl-subprocess", "wifi_chipset-backend"]
+    assert "flask" not in flagged
+
+
+def test_gate_flags_backends_after_primary_app_1b79(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    """1b79 baseline (depth 6, flask-app at hop[1], empty command log): the
+    primary application is exempt; the HTTP client and internal router behind
+    it are flagged."""
+    assert _flagged([
+        {"name": "apache-edge", "role": "reverse proxy"},
+        {"name": "flask-app", "role": "application framework"},
+        {"name": "curl-client", "role": "server-side HTTP client"},
+        {"name": "haproxy", "role": "load balancer"},
+        {"name": "mitmproxy", "role": "intercepting proxy"},
+        {"name": "internal.router", "role": "internal service router"},
+    ]) == ["curl-client", "internal.router"]
+
+
+def test_gate_flags_backend_after_leading_infra_chain_4f58(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    """4f58 baseline (depth 5, three leading infra hops, flask-app at hop[3],
+    empty command log): the leading run of infrastructure is skipped, flask-app
+    is the exempt primary application, and only the internal router behind it is
+    flagged."""
+    assert _flagged([
+        {"name": "apache-frontend", "role": "reverse proxy"},
+        {"name": "haproxy", "role": "load balancer"},
+        {"name": "mitmproxy", "role": "intercepting proxy"},
+        {"name": "flask-app", "role": "application framework"},
+        {"name": "internal.router", "role": "internal service router"},
+    ]) == ["internal.router"]
+
+
+def test_gate_accepts_architecture_of_only_infrastructure(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    """No non-infrastructure hop exists, so there is no primary application and
+    nothing to enumerate; the walk finds no primary and exits cleanly."""
+    assert _flagged([
+        {"name": "apache", "role": "reverse proxy"},
+        {"name": "haproxy", "role": "load balancer"},
+        {"name": "mitmproxy", "role": "intercepting proxy"},
+    ]) == []
+
+
+def test_gate_accepts_single_infrastructure_hop(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    """A lone infrastructure hop has no primary application behind it, so
+    nothing is flagged."""
+    assert _flagged([{"name": "apache", "role": "reverse proxy"}]) == []
+
+
+def test_gate_accepts_single_primary_application_hop(
+    _isolate_command_and_arch_stores: None,
+) -> None:
+    """A lone non-infrastructure hop is itself the primary application; it is
+    exempt and no hop follows it, so nothing is flagged."""
+    assert _flagged([{"name": "flask", "role": "application framework"}]) == []
