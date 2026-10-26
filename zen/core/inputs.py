@@ -342,6 +342,7 @@ def child_initial_input(
     parent_id: str,
     task: str,
     parent_history: list[Any],
+    hunt_task_block: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build the initial input for a child agent as a single user message.
 
@@ -349,6 +350,13 @@ def child_initial_input(
     one ``{"role": "user"}`` message keeps providers that require strictly
     alternating roles (e.g. Perplexity, llama.cpp) from rejecting consecutive
     user messages.
+
+    ``hunt_task_block`` is the pre-rendered structured delegation contract for a
+    hunter (see :meth:`zen.tools.agents_graph.contracts.HuntTask.render_block`).
+    When present it is appended after the free-text ``task`` so the child sees
+    both: the task framing, then the structured contract it must execute and
+    report against. Non-hunter children pass ``None`` and get the free-text path
+    unchanged.
     """
     parts: list[str] = []
     if parent_history:
@@ -370,4 +378,6 @@ def child_initial_input(
         "is complete.",
     )
     parts.append(task)
+    if hunt_task_block:
+        parts.append(hunt_task_block)
     return [{"role": "user", "content": "\n\n".join(parts)}]

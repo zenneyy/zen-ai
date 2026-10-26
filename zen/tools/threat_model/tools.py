@@ -31,6 +31,12 @@ from urllib.parse import urlsplit
 from agents import RunContextWrapper, function_tool
 
 from zen.core.agents import AgentCoordinator
+from zen.tools.threat_model.schema import (
+    HYPOTHESES_SECTION_ALIASES,
+    HYPOTHESIS_EXAMPLE,
+    parse_hypotheses,
+    referenced_evidence_ids,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -73,11 +79,9 @@ _SECTION_ALIASES = {
         "attack surface",
         "observed attack surface",
     ),
-    "hypotheses": (
-        "hypotheses",
-        "attacker hypotheses",
-        "hypothesized vulnerabilities",
-    ),
+    # Shared with the parser so the gate and the convention cannot disagree on
+    # where hypotheses live.
+    "hypotheses": HYPOTHESES_SECTION_ALIASES,
     "severity calibration": (
         "severity calibration",
         "severity",
@@ -427,11 +431,38 @@ def _unenumerated_indirect_services() -> list[str]:
     return missing
 
 
-def _save_impl(
+def _render_carried_forward_amendments(amendments: list[dict[str, Any]]) -> str:
+    """Render outstanding amendments as a trailing block so a save never drops them.
+
+    A save replaces the whole document. Rather than clear the amendments on it —
+    which silently loses any an agent added since the saver last read the model —
+    their text is appended here so none is lost; the saver reconciles them into
+    the body above and removes this block on the next save.
+    """
+    lines = [
+        "## Carried-Forward Amendments",
+        "",
+        "These addenda were outstanding when the model was last replaced. They are "
+        "preserved here so none is lost — reconcile them into the sections above and "
+        "remove this block on the next save.",
+        "",
+    ]
+    for amendment in amendments:
+        by = amendment.get("by") or "unknown"
+        at = amendment.get("at") or ""
+        text = str(amendment.get("content") or "").strip()
+        attribution = f"by {by}, {at}" if at else f"by {by}"
+        lines.append(f"- ({attribution}) {text}")
+    return "\n".join(lines)
+
+
+def _save_impl(  # noqa: PLR0911
     target: str,
     content: str,
     agent_name: str | None,
     scan_targets: list[str] | None = None,
+    *,
+    known_evidence_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     resolved, error = _resolve_target(target, scan_targets)
     if resolved is None:
@@ -442,14 +473,14 @@ def _save_impl(
         return {
             "success": False,
             "error": (
-                f"Threat model is too thin ({len(body)} chars). It has to be usable by "
+                f"content: threat model is too thin ({len(body)} chars). It has to be usable by "
                 "an agent seeing this target for the first time: what it is, who the "
                 "actors are, where the trust boundaries sit, which inputs are "
                 "attacker-controlled, and what a critical bug looks like here."
             ),
         }
     if len(body.encode("utf-8")) > _MAX_MODEL_BYTES:
-        return {"success": False, "error": "Threat model exceeds 512KB; tighten it."}
+        return {"success": False, "error": "content: threat model exceeds 512KB; tighten it."}
 
     missing = _missing_sections(body)
     if missing:
@@ -461,7 +492,7 @@ def _save_impl(
         return {
             "success": False,
             "error": (
-                "Threat model is missing required section(s): "
+                "content: threat model is missing required section(s): "
                 f"{', '.join(missing)}. Cover Overview, Architecture / "
                 "Request Path, Trust Boundaries and Assumptions, "
                 "Observations (attack surface evidence), Hypotheses "
@@ -470,8 +501,33 @@ def _save_impl(
             ),
         }
 
+    # Basis gate: every hypothesis in the Hypotheses section must follow the
+    # in-markdown convention — an explicit basis, and the basis-conditional
+    # field (supporting_evidence_ids for 'observed', inference_chain for
+    # 'inferred_from_architecture'). Reject naming the offending hypothesis.
+    _hypotheses, hypothesis_errors = parse_hypotheses(
+        body, known_evidence_ids=known_evidence_ids
+    )
+    if hypothesis_errors:
+        logger.debug(
+            "threat_model rejected — hypothesis convention: %s",
+            [(e.hypothesis_id, e.message) for e in hypothesis_errors],
+        )
+        first = hypothesis_errors[0]
+        return {
+            "success": False,
+            "error": (
+                f"Hypotheses: hypothesis {first.hypothesis_id!r} is not well-formed — "
+                f"{first.message}. Each hypothesis is one Markdown list item following the "
+                f"convention, e.g. `{HYPOTHESIS_EXAMPLE}`. `basis:` is required on every "
+                "hypothesis; basis 'observed' requires supporting_evidence_ids and "
+                "'inferred_from_architecture' requires an inference_chain."
+            ),
+        }
+
     unenumerated = _unenumerated_indirect_services()
     if unenumerated:
+        named = ", ".join(sorted(set(unenumerated)))
         logger.debug(
             "threat_model rejected — indirectly-reached services without "
             "a discovery pass: %s",
@@ -480,42 +536,54 @@ def _save_impl(
         return {
             "success": False,
             "error": (
-                "An indirectly-reached service was recorded during "
-                "reconnaissance but its route surface was never enumerated "
-                "with a discovery pass. Run content or route discovery "
-                "against every service reached indirectly — through a "
-                "server-side request, an internal network link, a redirect "
-                "revealing an internal host, discovered credentials, or "
-                "any other indirect path — before finalizing the threat "
-                "model."
+                f"Architecture: indirectly-reached service(s) recorded during reconnaissance "
+                f"were never enumerated with a discovery pass: {named}. Run content or route "
+                "discovery against each of these services — reached through a server-side "
+                "request, an internal network link, a redirect revealing an internal host, "
+                "discovered credentials, or any other indirect path — before finalizing the "
+                "threat model."
             ),
         }
 
     identity = _target_identity(resolved)
     with _store_lock:
         existing = _MODELS.get(identity)
-        folded = len(_amendments_of(existing)) if existing else 0
+        outstanding = _amendments_of(existing) if existing else []
+        stored_body = body
+        if outstanding:
+            stored_body = f"{body}\n\n{_render_carried_forward_amendments(outstanding)}"
+            if len(stored_body.encode("utf-8")) > _MAX_MODEL_BYTES:
+                return {
+                    "success": False,
+                    "error": (
+                        f"content: carrying the {len(outstanding)} outstanding amendment(s) "
+                        "forward would push the model past 512KB. Fold their content into the "
+                        "body yourself and tighten it so none is lost."
+                    ),
+                }
         _MODELS[identity] = {
             "target": identity,
             "written_at": datetime.now(UTC).isoformat(),
             "written_by": agent_name,
-            "content": body,
+            "content": stored_body,
         }
         _persist_locked()
 
+    folded = len(outstanding)
     message = (
         "Threat model shared with this scan. Subagents should call get_threat_model "
         "before they start, and treat its trust boundaries as the shared baseline."
     )
     if folded:
         message += (
-            f" This replaced a model carrying {folded} amendment(s), which are now "
-            "cleared - make sure what they said survives in the text you just wrote."
+            f" {folded} outstanding amendment(s) were carried forward into the saved document "
+            "so none was lost — reconcile them into the body and remove the "
+            "Carried-Forward Amendments block on your next save."
         )
     return {
         "success": True,
         "target": identity,
-        "amendments_cleared": folded,
+        "amendments_folded": folded,
         "message": message,
     }
 
@@ -528,8 +596,11 @@ def _append_amendment(
         model = _MODELS.get(identity)
         if model is None or not str(model.get("content", "")).strip():
             return None, (
-                "No threat model exists for this target yet, so there is nothing to "
-                "amend. Derive the base model and call save_threat_model instead."
+                "No threat model exists for this target yet, so there is nothing to amend — "
+                "amend only corrects a model that already exists. Derive the baseline from the "
+                "evidence you have (the code, or recon output) and publish it with "
+                "save_threat_model first; every later correction, including this one, is then "
+                "recorded with amend_threat_model."
             )
         amendments = _amendments_of(model)
         if len(amendments) >= _MAX_AMENDMENTS:
@@ -588,6 +659,38 @@ def _amend_impl(
             "alongside the base model."
         ),
     }
+
+
+async def _resolve_known_evidence_ids(
+    ctx: RunContextWrapper, content: str
+) -> set[str] | None:
+    """Resolve a hypothesis's ``supporting_evidence_ids`` against recorded evidence.
+
+    Bounded, and mirrors both the 1.2 ``surface_refs`` pattern and the reporting
+    tool's ``http_exchange_ids`` verification. The one resolvable evidence
+    namespace in the current engine is the proxy (Caido) request id — numeric,
+    and verifiable against the live project; the command log records command
+    strings, not addressable ids. So the numeric referenced ids are resolved
+    against the proxy when it is reachable, and the known-evidence set is those
+    that exist plus any non-proxy references (shape-checked only). When the
+    proxy is unavailable — or nothing numeric is referenced — ``None`` is
+    returned so resolution is skipped rather than blocking an otherwise
+    well-formed save (no new evidence store is built here; that is a later
+    section).
+    """
+    referenced = referenced_evidence_ids(content)
+    numeric = [rid for rid in referenced if rid.isdigit()]
+    if not numeric:
+        return None
+    try:
+        from zen.tools.proxy.tools import existing_request_ids
+
+        existing = await existing_request_ids(ctx, numeric)
+    except Exception:  # noqa: BLE001 - a proxy outage must never block a save
+        logger.debug("evidence-id resolution skipped: proxy unavailable", exc_info=True)
+        return None
+    non_numeric = {rid for rid in referenced if not rid.isdigit()}
+    return existing | non_numeric
 
 
 def _caller_agent_name(ctx: RunContextWrapper) -> str | None:
@@ -733,9 +836,15 @@ async def save_threat_model(ctx: RunContextWrapper, target: str, content: str) -
             pointed at.
         content: The full threat model in Markdown.
     """
+    known_evidence_ids = await _resolve_known_evidence_ids(ctx, content or "")
     return json.dumps(
         await asyncio.to_thread(
-            _save_impl, target, content, _caller_agent_name(ctx), _scan_targets(ctx)
+            _save_impl,
+            target,
+            content,
+            _caller_agent_name(ctx),
+            _scan_targets(ctx),
+            known_evidence_ids=known_evidence_ids,
         ),
         ensure_ascii=False,
         default=str,

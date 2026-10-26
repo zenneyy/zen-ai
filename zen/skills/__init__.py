@@ -103,6 +103,25 @@ def get_all_skill_names() -> set[str]:
     return {name for _, name in _iter_user_skill_files()}
 
 
+_VULN_SKILL_CATEGORY = "vulnerabilities"
+
+
+def get_vulnerability_class_names() -> set[str]:
+    """Return the base vulnerability class names (no category prefix).
+
+    Derived generically from the ``vulnerabilities/*`` skill catalog: every
+    ``vulnerabilities`` skill whose name is not a ``*_deep`` depth-variant
+    sibling. Callers that need the set of valid single-class assignments (e.g.
+    the typed hunt-task contract) read it from here so the set tracks the
+    shipped skills rather than a hand-maintained list.
+    """
+    return {
+        name
+        for category, name in _iter_user_skill_files()
+        if category == _VULN_SKILL_CATEGORY and not name.endswith("_deep")
+    }
+
+
 def _get_all_skill_keys() -> set[str]:
     keys: set[str] = set()
     for category, name in _iter_user_skill_files():
@@ -327,6 +346,25 @@ def validate_requested_skills(skill_list: list[str], max_skills: int = 5) -> str
         )
     if not skill_list:
         return None
+    # Internal-category modules (coordination/scan_modes/analysis) are attached
+    # by the framework — role persona, scan mode, always-on analysis — never
+    # requested by a caller. Reject them with a specific, actionable error
+    # distinct from the generic unknown-skill message, so a caller that tries to
+    # hand-pass one is told *why* it is refused rather than "unknown skill".
+    internal = sorted(
+        {
+            s
+            for s in skill_list
+            if "/" in s and s.split("/", 1)[0] in _INTERNAL_SKILL_CATEGORIES
+        }
+    )
+    if internal:
+        return (
+            f"Internal modules are attached by role, not requested: {internal}. "
+            f"Coordination personas follow the agent's role, scan-mode and analysis "
+            f"modules are always loaded — do not pass {sorted(_INTERNAL_SKILL_CATEGORIES)}/* "
+            f"slugs in `skills`."
+        )
     available = get_all_skill_names()
     available_keys = _get_all_skill_keys()
     invalid = sorted({s for s in skill_list if s not in available and s not in available_keys})

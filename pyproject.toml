@@ -262,6 +262,15 @@ ignore = [
 "zen/tools/notes/tools.py" = ["PLC0415", "TC002"]
 "zen/tools/finish/tool.py" = ["PLC0415", "TC002"]
 "zen/tools/reporting/tool.py" = ["PLC0415", "TC002"]
+# threat_model: lazy imports break a cycle with proxy / detected_stack / command_log.
+"zen/tools/threat_model/tools.py" = ["PLC0415", "TC002"]
+# The Hypothesis/Finding field-type Literals are imported for pydantic's runtime
+# get_type_hints(), so they must stay out of a type-checking-only block.
+"zen/tools/threat_model/schema.py" = ["TC001"]
+# One hypothesis is one physical line by convention, so these fixtures exceed the
+# line length by design.
+"tests/test_threat_model_tool.py" = ["E501"]
+"tests/test_threat_model_schema.py" = ["E501"]
 "zen/tools/**/*.py" = [
     "ARG001", # Unused function argument (tools may have unused args for interface consistency)
 ]

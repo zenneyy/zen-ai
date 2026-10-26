@@ -17,6 +17,8 @@ from zen.core.execution import notify_parent_on_terminal
 from zen.core.hooks import LLM_TURN_KEY
 from zen.report.state import get_global_report_state
 from zen.skills import validate_requested_skills
+from zen.tools.agents_graph.contracts import HuntReport, HuntTask
+from zen.tools.coverage.tools import get_coverage_entries
 
 
 _ACTIVE_STATUSES: frozenset[str] = frozenset({"running", "waiting"})
@@ -74,12 +76,15 @@ def _render_completion_report(
     recommendations: list[str],
     open_items: list[str],
     filed_reports: list[dict[str, Any]] | None = None,
+    hunt_digest: dict[str, Any] | None = None,
 ) -> str:
     """Render a child's completion report as plain structured text.
 
     Goes into the parent's SDK session with coordinator-added sender
     metadata, so this body just carries the contents. No XML — no
-    escaping concerns, no parser ambiguity.
+    escaping concerns, no parser ambiguity. For a hunter, ``hunt_digest``
+    carries the structured result (impact reached, variant leads, …) so the
+    parent reads the digest here instead of re-reading shared state.
     """
     status = "SUCCESS" if success else "FAILED"
     completion_time = datetime.now(UTC).isoformat()
@@ -94,6 +99,20 @@ def _render_completion_report(
     lines.append("")
     lines.append("Summary:")
     lines.append(result_summary or "(none)")
+    if hunt_digest is not None:
+        lines.append("")
+        lines.append("Hunt digest:")
+        impact = hunt_digest.get("impact_reached")
+        lines.append(f"- impact_reached: {impact if impact is not None else '(none confirmed)'}")
+        variant_leads = hunt_digest.get("variant_leads") or []
+        if variant_leads:
+            lines.append("- variant_leads (candidate follow-up hunts):")
+            lines.extend(f"  - {lead}" for lead in variant_leads)
+        else:
+            lines.append("- variant_leads: (none)")
+        new_surface = hunt_digest.get("new_surface") or []
+        if new_surface:
+            lines.append(f"- new_surface discovered: {', '.join(str(s) for s in new_surface)}")
     if findings:
         lines.append("")
         lines.append("Findings:")
@@ -494,23 +513,40 @@ async def wait_for_agents(  # noqa: PLR0911
     )
 
 
+_ROOT_PERSONA = "coordination/root_agent"
 _RECON_PERSONA = "coordination/recon_agent"
 _HUNTER_PERSONA = "coordination/hunter_agent"
 
+# The role a child is spawned as. ``root`` is the orchestrator (it is built
+# directly, not via create_agent, but kept here as the single source of truth);
+# ``recon`` and ``hunter`` are the two personas that ship today; ``validator``,
+# ``reviewer`` and ``generic`` have no persona yet — theirs arrive in later
+# sections — and ``generic`` is the default for an unlabelled child.
+AgentRole = Literal["root", "recon", "hunter", "validator", "reviewer", "generic"]
 
-def _role_persona_for(name: str, skills: list[str]) -> tuple[str | None, str | None]:
-    """Pick the role persona a spawned child should carry, if any.
+# The single source of truth: role → persona module, and which roles REQUIRE a
+# persona. A persona-requiring role that resolves to no persona is a spawn-
+# blocking invariant breach, not a silent skip.
+_ROLE_PERSONA: dict[str, str] = {
+    "root": _ROOT_PERSONA,
+    "recon": _RECON_PERSONA,
+    "hunter": _HUNTER_PERSONA,
+}
+_PERSONA_REQUIRED_ROLES: frozenset[str] = frozenset({"root", "recon", "hunter"})
 
-    The child's ``name`` decides first: a name that says what the agent is
-    (``recon`` / ``hunter``) selects that role's persona. Only when the name is
-    silent does the requested ``skills`` list break the tie, and only when every
-    entry points one way — a list wholly under ``reconnaissance/`` or wholly
-    under ``vulnerabilities/``. A mixed, bare, or empty list yields no persona:
-    an unlabelled agent stays persona-less rather than be guessed at.
 
-    Returns ``(persona, trigger)`` where ``trigger`` names the rule that fired
-    (``"name_match"`` or ``"skill_fallback"``), or ``(None, None)`` when no role
-    could be determined.
+class PersonaResolutionError(RuntimeError):
+    """A persona-requiring role resolved to no persona — the spawn must fail loudly."""
+
+
+def _legacy_name_skill_persona(name: str, skills: list[str]) -> tuple[str | None, str | None]:
+    """The pre-``role`` heuristic: guess a persona from the name or a uniform skill list.
+
+    Kept ONLY as a fallback for legacy callers that do not pass an explicit
+    ``role``. The child's ``name`` decides first (a name that says ``recon`` /
+    ``hunter``); only when the name is silent does a skills list wholly under
+    ``reconnaissance/`` or wholly under ``vulnerabilities/`` break the tie. A
+    mixed, bare, or empty list yields no persona.
     """
     lowered = (name or "").lower()
     if "recon" in lowered:
@@ -524,29 +560,122 @@ def _role_persona_for(name: str, skills: list[str]) -> tuple[str | None, str | N
     return None, None
 
 
-def _maybe_attach_role_persona(name: str, skills: list[str]) -> list[str]:
+def _role_persona_for(
+    name: str, skills: list[str], *, role: AgentRole = "generic"
+) -> tuple[str | None, str | None]:
+    """Pick the role persona a spawned child should carry, if any.
+
+    The explicit ``role`` is authoritative: a role in :data:`_ROLE_PERSONA` maps
+    directly to its persona module (trigger ``"role:<role>"``). Only
+    ``generic`` — the default, i.e. a legacy caller that passed no role — falls
+    back to the old name/skill heuristic, and when that weak path fires it logs
+    a WARNING naming the agent so the guess is visible. ``validator`` /
+    ``reviewer`` have no persona yet and resolve to ``(None, None)``.
+
+    ``role`` is keyword-only with a ``generic`` default so legacy positional
+    callers (``_role_persona_for(name, skills)``) keep working unchanged.
+
+    Returns ``(persona, trigger)``, or ``(None, None)`` when no persona applies.
+    """
+    persona = _ROLE_PERSONA.get(role)
+    if persona is not None:
+        return persona, f"role:{role}"
+    if role != "generic":
+        # validator / reviewer: a known role with no persona yet. No guessing.
+        return None, None
+    legacy_persona, legacy_trigger = _legacy_name_skill_persona(name, skills)
+    if legacy_persona is not None:
+        logger.warning(
+            "persona_fallback: legacy name/skill heuristic resolved persona=%s (trigger=%s) "
+            "for agent name=%r because no explicit role= was passed. Pass role= to "
+            "create_agent so this does not rely on the weak path.",
+            legacy_persona,
+            legacy_trigger,
+            name,
+        )
+    return legacy_persona, legacy_trigger
+
+
+def _resolve_effective_skills(
+    *, role: AgentRole, name: str, skills: list[str]
+) -> tuple[list[str], str | None, str | None, bool]:
+    """Resolve the child's role persona and return the effective skills list.
+
+    Returns ``(effective_skills, persona, trigger, root_included)``. The persona
+    is prepended when one applies and is not already present (dedup, not
+    stacking); the input list is never mutated. For a persona-REQUIRING role
+    that resolves to no persona, this raises :class:`PersonaResolutionError` and
+    logs an error — the spawn must fail loudly rather than ship a role agent
+    with no framing.
+    """
+    persona, trigger = _role_persona_for(name, skills, role=role)
+    if role in _PERSONA_REQUIRED_ROLES and persona is None:
+        logger.error(
+            "persona_attach FAILED: role=%r name=%r requires a persona but none resolved; "
+            "spawn blocked (role→persona map=%s)",
+            role,
+            name,
+            _ROLE_PERSONA,
+        )
+        raise PersonaResolutionError(
+            f"Role {role!r} (agent {name!r}) requires a role persona but none could be "
+            f"resolved. This is a spawn-blocking invariant breach: the role→persona map "
+            f"has no entry for {role!r}."
+        )
+    root_included = persona is not None and persona in skills
+    effective = list(skills) if persona is None or persona in skills else [persona, *skills]
+    if role in _PERSONA_REQUIRED_ROLES and persona not in effective:
+        raise PersonaResolutionError(
+            f"Role {role!r} (agent {name!r}) persona {persona!r} did not attach to the "
+            f"effective skills — spawn blocked."
+        )
+    return effective, persona, trigger, root_included
+
+
+def _maybe_attach_role_persona(
+    name: str, skills: list[str], *, role: AgentRole = "generic"
+) -> list[str]:
     """Return ``skills`` with the child's role persona attached when one applies.
 
-    A structural safety net for the prose rule that a spawned role agent should
-    carry its persona: the matching persona is prepended when
-    :func:`_role_persona_for` finds one and it is not already present (dedup, not
-    stacking). A child with no determinable role, or one that already lists its
-    persona, is returned with the same contents. The input list is never
-    mutated.
+    Thin wrapper over :func:`_resolve_effective_skills` kept for the structural
+    safety net it provides and for legacy positional callers. ``role`` is
+    keyword-only with a ``generic`` default, so a bare ``(name, skills)`` call
+    behaves as before (legacy heuristic). The input list is never mutated.
     """
-    persona, _ = _role_persona_for(name, skills)
-    if persona is None or persona in skills:
-        return list(skills)
-    return [persona, *skills]
+    effective, *_ = _resolve_effective_skills(role=role, name=name, skills=skills)
+    return effective
+
+
+def _known_surface_ids(inner: dict[str, Any]) -> set[str] | None:
+    """Known surface identifiers for validating a hunt task's ``surface_refs``.
+
+    A hunt task may reference surfaces by coverage entry id or by the surface
+    string the run recorded for them, so both are accepted. Returns ``None``
+    when nothing is known yet (no coverage recorded, or the ledger is
+    unavailable): with no registry to resolve against, surface refs are not
+    enforced rather than rejected wholesale.
+    """
+    del inner  # Reserved for future per-run surface registries; coverage is global today.
+    known: set[str] = set()
+    for entry in get_coverage_entries():
+        entry_id = str(entry.get("entry_id") or "").strip()
+        surface = str(entry.get("surface") or "").strip()
+        if entry_id:
+            known.add(entry_id)
+        if surface:
+            known.add(surface)
+    return known or None
 
 
 @function_tool(timeout=120)
-async def create_agent(
+async def create_agent(  # noqa: PLR0911
     ctx: RunContextWrapper,
     name: str,
     task: str,
     inherit_context: bool = True,
     skills: list[str] | None = None,
+    role: AgentRole = "generic",
+    hunt_task: str | None = None,
 ) -> str:
     """Spawn a specialist child agent to run in parallel.
 
@@ -559,6 +688,14 @@ async def create_agent(
     **Before spawning, call ``view_agent_graph``** to confirm no
     existing agent already covers this scope — duplicate specialists
     waste turns and create coordination headaches.
+
+    **Set ``role`` for every child.** It decides the role persona the
+    child carries — ``recon`` and ``hunter`` each get theirs attached
+    automatically; you do NOT pass ``coordination/*`` modules in
+    ``skills`` (they are refused). Use ``validator`` / ``reviewer`` /
+    ``generic`` for children that have no persona yet. A spawn that omits
+    ``role`` falls back to a weaker name/skill guess and is logged as
+    such — pass the role explicitly.
 
     **Specialization principles:**
 
@@ -586,7 +723,9 @@ async def create_agent(
             state it should build on rather than rediscover — what
             recon already mapped, which surfaces are already covered,
             which coverage entry it is picking up. A child that is not
-            told what is already known repeats it.
+            told what is already known repeats it. For a ``hunter``, this
+            stays the human-readable framing; the structured contract
+            rides in ``hunt_task``.
         inherit_context: Default ``True``. The child receives the
             parent's input history as background; only set ``False``
             when starting a clean-slate task.
@@ -596,6 +735,19 @@ async def create_agent(
             and do not count toward the 5-skill cap.  Each vulnerability
             class already auto-loads its core tools via ``related:``
             frontmatter, so only pass tools beyond the auto-loaded set.
+            Do NOT pass ``coordination/*`` personas here — they follow
+            ``role``.
+        role: The child's role: ``recon`` (surface mapping), ``hunter``
+            (prosecute one vulnerability class against one surface),
+            ``validator`` / ``reviewer`` / ``generic``. Drives the role
+            persona. Default ``generic``.
+        hunt_task: For a ``hunter`` only — a JSON object serializing the
+            typed hunt contract (objective, the single ``vuln_class`` to
+            prosecute, ``surface_refs``, hypothesis basis, depth tier,
+            impact objective, scope, required evidence, and a free-text
+            ``rationale``). When present it is validated and rendered into
+            the child's first turn as a structured delegation block. Omit
+            it to delegate via the free-text ``task`` alone.
     """
     inner = _ctx(ctx)
     coordinator = coordinator_from_context(inner)
@@ -627,14 +779,54 @@ async def create_agent(
             default=str,
         )
 
-    # Structural backstop for the prose handoff rule in coordination/root_agent:
-    # a recon or hunter child must carry its role persona even when the caller
-    # omits it from the skills list. Attached after validation so it never trips
-    # the user-skill checks or the non-tooling cap — the persona is a structural
-    # role skill, not one of the caller's requested specialties.
-    persona, persona_trigger = _role_persona_for(name, skill_list)
-    persona_root_included = persona is not None and persona in skill_list
-    effective_skills = _maybe_attach_role_persona(name, skill_list)
+    # Role persona (the sole legitimate injector of a coordination/* module on a
+    # child) is attached here, after skill validation so it never trips the
+    # user-skill checks or the non-tooling cap. A persona-requiring role that
+    # resolves to nothing fails the spawn loudly rather than shipping a role
+    # agent with no framing.
+    try:
+        effective_skills, persona, persona_trigger, persona_root_included = (
+            _resolve_effective_skills(role=role, name=name, skills=skill_list)
+        )
+    except PersonaResolutionError as exc:
+        return json.dumps(
+            {"success": False, "error": str(exc), "agent_id": None},
+            ensure_ascii=False,
+            default=str,
+        )
+
+    # Typed hunt handoff: a hunter's structured contract rides alongside the
+    # free-text task; every other role keeps the free-text path untouched.
+    hunt_task_block: str | None = None
+    if hunt_task is not None and str(hunt_task).strip():
+        if role != "hunter":
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"hunt_task is only accepted for role='hunter'; got role={role!r}. "
+                        "Other roles use the free-text task path."
+                    ),
+                    "agent_id": None,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        try:
+            parsed_task = HuntTask.model_validate_json(
+                hunt_task, context={"known_surface_ids": _known_surface_ids(inner)}
+            )
+        except ValueError as exc:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"invalid hunt_task: {exc}",
+                    "agent_id": None,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        hunt_task_block = parsed_task.render_block()
 
     parent_history = list(ctx.turn_input) if inherit_context and ctx.turn_input else []
     try:
@@ -644,6 +836,8 @@ async def create_agent(
             task=task,
             skills=effective_skills,
             parent_history=parent_history,
+            role=role,
+            hunt_task_block=hunt_task_block,
         )
     except Exception as e:
         logger.exception("create_agent: scan runner failed to spawn child '%s'", name)
@@ -654,19 +848,24 @@ async def create_agent(
         )
 
     logger.info(
-        "create_agent: spawned %s (%s) parent=%s skills=%d requested=%s task_len=%d",
+        "create_agent: spawned %s (%s) parent=%s role=%s skills=%d requested=%s "
+        "task_len=%d hunt_task=%s",
         result.get("agent_id"),
         name,
         parent_id or "-",
+        role,
         len(skill_list),
         skill_list,
         len(task or ""),
+        hunt_task_block is not None,
     )
     if persona is not None:
         logger.info(
-            "persona_autoattach: child=%s name=%r persona=%s trigger=%s root_included=%s",
+            "persona_autoattach: child=%s name=%r role=%s persona=%s trigger=%s "
+            "root_included=%s",
             result.get("agent_id"),
             name,
+            role,
             persona,
             persona_trigger,
             persona_root_included,
@@ -688,6 +887,7 @@ async def agent_finish(
     success: bool = True,
     report_to_parent: bool = True,
     final_recommendations: list[str] | None = None,
+    hunt_report: str | None = None,
 ) -> str:
     """Subagent termination — post a completion report to the parent.
 
@@ -738,6 +938,15 @@ async def agent_finish(
         final_recommendations: Optional next-step suggestions for the
             parent (e.g., "prioritize testing X", "spawn an agent to
             cover Y").
+        hunt_report: **Required when this agent's role is ``hunter``.** A
+            JSON object serializing the typed hunt result — which
+            hypotheses were tested, the evidence ids, the highest impact
+            ladder rung actually reached, variant leads worth a follow-up
+            hunt, any ``filed_report_ids`` (which oblige a stated
+            ``root_cause``), coverage deltas, newly discovered surface,
+            and open items. Its digest is posted to the parent so the
+            parent reads the result here rather than re-reading shared
+            state. Leave unset for non-hunter roles.
     """
     inner = _ctx(ctx)
     coordinator = coordinator_from_context(inner)
@@ -762,8 +971,40 @@ async def agent_finish(
             default=str,
         )
 
+    # A hunter owes the typed result at finish time. Require it, validate it, and
+    # persist it to shared state so the parent can read the full report; its
+    # digest also rides the completion report below.
+    role = str(inner.get("role", "generic"))
+    parsed_report: HuntReport | None = None
+    if role == "hunter":
+        if hunt_report is None or not str(hunt_report).strip():
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        "hunter agents must pass a hunt_report (the typed hunt result) to "
+                        "agent_finish — it carries impact_reached, variant_leads, filed "
+                        "report ids and open items for the parent."
+                    ),
+                    "agent_id": me,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        try:
+            parsed_report = HuntReport.model_validate_json(hunt_report)
+        except ValueError as exc:
+            return json.dumps(
+                {"success": False, "error": f"invalid hunt_report: {exc}", "agent_id": me},
+                ensure_ascii=False,
+                default=str,
+            )
+        await coordinator.update_metadata(me, hunt_report=parsed_report.model_dump(mode="json"))
+
     filed_reports = _filed_reports_by(me)
     filed_report_ids = [str(r.get("id")) for r in filed_reports]
+
+    hunt_digest = parsed_report.digest() if parsed_report is not None else None
 
     parent_notified = False
     if report_to_parent and await coordinator.claim_parent_notice(me):
@@ -779,6 +1020,7 @@ async def agent_finish(
             recommendations=list(final_recommendations or []),
             open_items=list(open_items or []),
             filed_reports=filed_reports,
+            hunt_digest=hunt_digest,
         )
         await coordinator.send(
             parent_id,
@@ -799,11 +1041,14 @@ async def agent_finish(
         await notify_parent_on_terminal(coordinator, me, "completed")
 
     logger.info(
-        "agent_finish: %s success=%s findings=%d filed_reports=%d parent_notified=%s",
+        "agent_finish: %s role=%s success=%s findings=%d filed_reports=%d "
+        "hunt_report=%s parent_notified=%s",
         me,
+        role,
         success,
         len(findings or []),
         len(filed_report_ids),
+        parsed_report is not None,
         parent_notified,
     )
 
@@ -818,6 +1063,7 @@ async def agent_finish(
             "findings_count": len(findings or []),
             "open_items_count": len(open_items or []),
             "has_recommendations": bool(final_recommendations),
+            "hunt_report_recorded": parsed_report is not None,
         },
         ensure_ascii=False,
         default=str,

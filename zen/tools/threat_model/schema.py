@@ -1,0 +1,526 @@
+"""Structured Hypothesis / Finding records carried in the threat-model markdown.
+
+The threat model stays a markdown document (the event-sourced ledger is a later
+section). These models are the *structured* half of it: a transitional block
+parsed out of the markdown's **Hypotheses** section so the save gate and the
+generated persona CONTRACT reason over the same typed shape instead of over
+prose.
+
+Three things live here and are imported by every consumer so they cannot drift:
+
+* :class:`Hypothesis` and :class:`Finding` — the validated records.
+* The **in-markdown hypothesis convention** (:data:`HYPOTHESIS_CONVENTION`, plus
+  the ``HYPOTHESIS_*`` tokens) — the single, greppable grammar one hypothesis is
+  written in, and the parser (:func:`parse_hypotheses`) that reads it.
+* :data:`HYPOTHESES_SECTION_ALIASES` — the headings that name the section,
+  shared with the threat-model tool's required-section table.
+
+``basis`` is reused verbatim from the delegation contracts
+(:data:`zen.tools.agents_graph.contracts.HuntBasis`), and so are the depth and
+impact ladders (:data:`DepthTier`, :data:`ImpactRung`). There is one definition
+of each; nothing here re-declares them.
+
+A word the field docs keep making, because it is the load-bearing distinction:
+``basis`` is *evidentiary grounding* — how well a claim is supported — and
+nothing else. It is **not** a difficulty rating, a sophistication tier, or a
+measure of how hard the technique is. Where a hypothesis sits on the ambition
+scale lives in ``target_depth`` and ``impact_objective``. Every ``basis`` value
+and every rung of those ladders admits the full spectrum of research, from a
+first-pass confirmation to original, previously-unseen technique; none of them
+caps the depth a researcher may bring.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from zen.tools.agents_graph.contracts import DepthTier, HuntBasis, ImpactRung
+
+
+if TYPE_CHECKING:
+    from pydantic import ValidationInfo
+
+
+# ── the in-markdown hypothesis convention (single source of truth) ───────────
+#
+# One hypothesis is ONE Markdown list item on ONE line. Its fields are written
+# as ``key: value`` pairs separated by ``" | "`` (space-pipe-space); a list
+# value (evidence ids, dependency ids) is comma-separated and an
+# ``inference_chain`` is semicolon-separated. ``id`` and ``basis`` are required
+# on every entry; the rest are optional. A value must not itself contain the
+# ``" | "`` field separator.
+#
+# Both the save-gate parser (threat_model.tools._save_impl) and the generated
+# persona CONTRACT (zen.agents.contract) import these constants, so the grammar
+# they enforce and the grammar they teach are the same bytes.
+
+HYPOTHESIS_BULLETS: tuple[str, ...] = ("- ", "* ")
+"""A hypothesis entry is a Markdown list item beginning with one of these."""
+
+HYPOTHESIS_FIELD_SEP = " | "
+"""Fields within one entry are separated by space-pipe-space."""
+
+HYPOTHESIS_KV_SEP = ":"
+"""Each field is ``key: value`` (split on the first colon only)."""
+
+HYPOTHESIS_ID_LIST_SEP = ","
+"""Items within an id-list field (evidence ids, ``depends_on``) are comma-separated."""
+
+HYPOTHESIS_CHAIN_SEP = ";"
+"""Steps within ``inference_chain`` are semicolon-separated."""
+
+BASIS_MARKER = "basis"
+"""The explicit, greppable key every hypothesis must carry."""
+
+HYPOTHESES_SECTION_ALIASES: tuple[str, ...] = (
+    "hypotheses",
+    "attacker hypotheses",
+    "hypothesized vulnerabilities",
+)
+"""Headings that name the Hypotheses section. Shared with the tool's
+required-section table so the two cannot disagree on where hypotheses live."""
+
+# A ready-to-read example used verbatim by the generated CONTRACT, so the
+# grammar an agent is shown is the grammar the gate parses. Class-agnostic: the
+# mechanism and observable are placeholders, not a specific vulnerability.
+HYPOTHESIS_EXAMPLE = (
+    "- id: H1 | basis: observed | mechanism: <how the weakness would work> | "
+    "predicted_observable: <the signal that would confirm it> | "
+    "supporting_evidence_ids: <evidence-id>, <evidence-id> | "
+    "target_depth: discover | impact_objective: primitive | "
+    "rationale: <free-text reasoning>"
+)
+
+
+@dataclass(frozen=True)
+class _HypothesisConventionSpec:
+    """The convention as importable data, so consumers describe one grammar."""
+
+    bullets: tuple[str, ...]
+    field_sep: str
+    kv_sep: str
+    id_list_sep: str
+    chain_sep: str
+    basis_marker: str
+    section_aliases: tuple[str, ...]
+    example: str
+
+    def describe(self) -> list[str]:
+        """Human-readable lines describing the grammar (rendered into CONTRACT)."""
+        return [
+            "Each hypothesis is one Markdown list item on one line, in the "
+            "Hypotheses section, written as `key: value` fields separated by "
+            "` | ` (space-pipe-space).",
+            f"`{self.basis_marker}:` is required on every hypothesis and must be "
+            f"one of {', '.join(HYPOTHESIS_BASIS_VALUES)} — this is the evidentiary "
+            "grounding of the claim, not a difficulty or depth rating.",
+            "`basis: observed` requires a non-empty `supporting_evidence_ids` "
+            "(ids of recorded tool-call evidence); `basis: "
+            "inferred_from_architecture` requires a non-empty `inference_chain` "
+            "(the architecture-to-hypothesis reasoning steps, `;`-separated).",
+            "Depth and ambition live in `target_depth` and `impact_objective`, "
+            "not in `basis`; every basis value admits the full spectrum of "
+            "research depth.",
+            f"Example — {self.example}",
+        ]
+
+
+HYPOTHESIS_CONVENTION = _HypothesisConventionSpec(
+    bullets=HYPOTHESIS_BULLETS,
+    field_sep=HYPOTHESIS_FIELD_SEP,
+    kv_sep=HYPOTHESIS_KV_SEP,
+    id_list_sep=HYPOTHESIS_ID_LIST_SEP,
+    chain_sep=HYPOTHESIS_CHAIN_SEP,
+    basis_marker=BASIS_MARKER,
+    section_aliases=HYPOTHESES_SECTION_ALIASES,
+    example=HYPOTHESIS_EXAMPLE,
+)
+
+# The basis values, surfaced as a tuple for the CONTRACT and alignment test.
+HYPOTHESIS_BASIS_VALUES: tuple[str, ...] = ("observed", "inferred_from_architecture", "assumed")
+
+
+# ── evidence-id shape ────────────────────────────────────────────────────────
+#
+# What counts as a *resolvable* evidence id given the current engine: a proxy
+# (Caido) request id — numeric, verifiable against the live project via
+# ``zen.tools.proxy.tools.existing_request_ids``. The command log records
+# command *strings*, not addressable ids, so it offers nothing to reference by
+# id. Shape validation below stays deliberately general (any bounded,
+# whitespace-free token) so a future evidence namespace is not excluded;
+# membership is resolved separately, and only when a known-evidence set is
+# supplied (see :meth:`Hypothesis._check_grounding`).
+
+_EVIDENCE_ID_MAX_CHARS = 64
+
+
+def _validate_evidence_ids(values: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for raw in values:
+        token = raw.strip()
+        if not token:
+            raise ValueError("an evidence id cannot be empty")
+        if len(token) > _EVIDENCE_ID_MAX_CHARS:
+            raise ValueError(f"evidence id {token!r} exceeds {_EVIDENCE_ID_MAX_CHARS} characters")
+        if any(ch.isspace() for ch in token) or HYPOTHESIS_FIELD_SEP.strip() in token:
+            raise ValueError(f"evidence id {token!r} must be a single whitespace-free token")
+        cleaned.append(token)
+    return cleaned
+
+
+HypothesisState = Literal["open", "testing", "confirmed", "refuted", "blocked"]
+FindingState = Literal["open", "testing", "confirmed", "refuted", "blocked"]
+Confidence = Literal["low", "medium", "high"]
+
+
+class Hypothesis(BaseModel):
+    """A single suspected weakness, with its evidentiary grounding made explicit.
+
+    A hypothesis records *what might be wrong and how well the suspicion is
+    supported* — never how hard it would be to prosecute. The sophistication a
+    researcher brings is unbounded at every grounding and every depth: an
+    ``assumed`` hypothesis at ``target_depth: confirm`` may still demand
+    original technique, and an ``observed`` one may fall to a textbook step.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    """Stable handle for this hypothesis within the model — named in gate
+    rejections, and the target of another hypothesis's ``depends_on`` /
+    ``variant_of``."""
+
+    basis: HuntBasis
+    """Evidentiary grounding, and nothing else. ``observed`` — rests on a
+    captured observation (which ``supporting_evidence_ids`` must cite);
+    ``inferred_from_architecture`` — implied by the documented structure, not
+    yet seen (which ``inference_chain`` must lay out); ``assumed`` — a
+    reasonable suspicion with no direct backing yet. This is *how well-supported
+    the claim is*, NOT a difficulty tier and NOT a depth tier; it places no
+    ceiling on the technique the hunt may require."""
+
+    mechanism: str = ""
+    """How the weakness would work — the causal story from attacker-controlled
+    input to the consequence, at whatever depth the claim warrants."""
+
+    predicted_observable: str = ""
+    """The specific signal that would confirm the hypothesis if prosecuted — the
+    observable that separates ``confirmed`` from ``suspected`` for this claim."""
+
+    supporting_evidence_ids: list[str] = Field(default_factory=list)
+    """Ids of recorded tool-call evidence that ground an ``observed`` basis
+    (proxy request ids today). Required non-empty when ``basis == observed``;
+    their shape is always validated, and membership is resolved against a
+    known-evidence set only when one is supplied."""
+
+    refuting_evidence_ids: list[str] = Field(default_factory=list)
+    """Ids of recorded evidence that argue against the hypothesis — the
+    counter-case, kept alongside the supporting case."""
+
+    inference_chain: list[str] = Field(default_factory=list)
+    """The architecture-to-hypothesis reasoning steps for an
+    ``inferred_from_architecture`` basis — each a link from the documented
+    structure to the suspected weakness. Required non-empty for that basis."""
+
+    target_depth: DepthTier | None = None
+    """How far a hunt should prosecute this — ``confirm`` / ``discover`` /
+    ``deep``. Depth, not grounding: this is where ambition is recorded. Every
+    tier admits beginner-through-zero-day technique; ``deep`` is broader in
+    scope, not merely harder."""
+
+    impact_objective: ImpactRung | None = None
+    """How far up the impact ladder a confirmed finding should be carried —
+    ``reach`` → ``trigger`` → ``primitive`` → ``weaponized`` → ``chained``. The
+    ladder orders consequence, not difficulty; reaching any rung may take
+    anything from a textbook step to original research."""
+
+    confidence: Confidence | None = None
+    """The writer's calibrated confidence that this is real — ``low`` /
+    ``medium`` / ``high``. Distinct from ``basis``: a well-grounded
+    (``observed``) hypothesis can still be low-confidence, and a merely
+    ``assumed`` one can be high-confidence on strong priors."""
+
+    priority: Confidence | None = None
+    """How much this is worth prosecuting relative to its siblings — ``low`` /
+    ``medium`` / ``high``. Advisory; the engagement lead sets the order."""
+
+    depends_on: list[str] = Field(default_factory=list)
+    """Ids of hypotheses this one presupposes — a precondition that must hold
+    before this one is reachable."""
+
+    variant_of: str = ""
+    """Id of a parent hypothesis this one is a variant of — a sibling in the
+    same class's technique tree, not an independent claim."""
+
+    owner: str = ""
+    """Agent or role currently prosecuting this hypothesis, if assigned."""
+
+    state: HypothesisState = "open"
+    """Where the hypothesis stands: ``open`` (untried), ``testing`` (in
+    progress), ``confirmed``, ``refuted``, or ``blocked`` (needs access or a
+    precondition that is not yet met)."""
+
+    rationale: str = ""
+    """Free-text reasoning for the model's benefit — context, not contract; the
+    typed fields above are what the gate reads."""
+
+    @field_validator("supporting_evidence_ids", "refuting_evidence_ids")
+    @classmethod
+    def _evidence_shape(cls, value: list[str]) -> list[str]:
+        return _validate_evidence_ids(value)
+
+    @model_validator(mode="after")
+    def _check_grounding(self, info: ValidationInfo) -> Hypothesis:
+        """Enforce the basis-conditional fields, then resolve evidence ids.
+
+        The grounding rules are structural and always apply. Resolution mirrors
+        the 1.2 ``surface_refs`` pattern: a ``known_evidence_ids`` set supplied
+        through validation context is enforced as membership; with no such set
+        in context the ids are shape-checked only (skip, never reject wholesale).
+        """
+        if self.basis == "observed" and not self.supporting_evidence_ids:
+            raise ValueError(
+                f"hypothesis {self.id!r}: basis 'observed' asserts a captured observation, so it "
+                "requires at least one supporting_evidence_id citing the recorded tool-call "
+                "evidence (e.g. a proxy request id). State the evidence, or use basis "
+                "'inferred_from_architecture' / 'assumed' if the claim is not yet observed."
+            )
+        if self.basis == "inferred_from_architecture" and not self.inference_chain:
+            raise ValueError(
+                f"hypothesis {self.id!r}: basis 'inferred_from_architecture' asserts the claim is "
+                "implied by the documented structure, so it requires a non-empty inference_chain "
+                "laying out the architecture-to-hypothesis reasoning steps."
+            )
+        known = info.context.get("known_evidence_ids") if info.context else None
+        if known is not None:
+            known_set = set(known)
+            unknown = [eid for eid in self.supporting_evidence_ids if eid not in known_set]
+            if unknown:
+                raise ValueError(
+                    f"hypothesis {self.id!r}: supporting_evidence_ids do not resolve to recorded "
+                    f"evidence: {sorted(unknown)}. Cite ids of evidence the run actually "
+                    "captured (proxy request ids), not invented references."
+                )
+        return self
+
+
+class Finding(BaseModel):
+    """A candidate that a hunter raises; ``confirmed`` is unreachable without a verdict.
+
+    Hunters produce candidates (``open`` / ``testing``). The transition to
+    ``confirmed`` is a validator's call, not a hunter's: the constraint here is
+    structural, so nothing can mark a finding confirmed without naming the
+    verdict and who authored it. No verdict producer exists in this section, so
+    in practice findings stay pre-confirmed now — the gate is the point.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    """Stable handle for this finding within the run."""
+
+    hypothesis_id: str = ""
+    """Id of the :class:`Hypothesis` this finding prosecutes, so a candidate can
+    be reconciled back to the claim that motivated it."""
+
+    title: str = ""
+    """Short human-readable label."""
+
+    state: FindingState = "open"
+    """``open`` / ``testing`` — a hunter's candidate. ``confirmed`` requires a
+    validator verdict (see the model constraint). ``refuted`` / ``blocked``
+    otherwise."""
+
+    validator_verdict_id: str = ""
+    """Id of the validator verdict that confirmed this finding. Required
+    (non-empty) for ``state == confirmed``."""
+
+    verdict_author: str = ""
+    """Id of the agent/validator that authored the verdict. Required (non-empty)
+    for ``state == confirmed`` — a confirmation is attributable or it is not a
+    confirmation."""
+
+    evidence_ids: list[str] = Field(default_factory=list)
+    """Ids of recorded evidence backing the finding (proxy request ids today)."""
+
+    root_cause: str = ""
+    """Why the defect exists at its source — expected once a finding is
+    confirmed and filed."""
+
+    impact_reached: ImpactRung | None = None
+    """The highest impact-ladder rung actually demonstrated, not hoped for."""
+
+    rationale: str = ""
+    """Free-text reasoning; context, not contract."""
+
+    @field_validator("evidence_ids")
+    @classmethod
+    def _evidence_shape(cls, value: list[str]) -> list[str]:
+        return _validate_evidence_ids(value)
+
+    @model_validator(mode="after")
+    def _confirmed_needs_verdict(self) -> Finding:
+        if self.state == "confirmed" and not (
+            self.validator_verdict_id.strip() and self.verdict_author.strip()
+        ):
+            raise ValueError(
+                f"finding {self.id!r}: state 'confirmed' requires both a validator_verdict_id and "
+                "a verdict_author — a hunter produces candidates (state 'open'/'testing'); only a "
+                "validator verdict confirms a finding, and the confirmation must be attributable."
+            )
+        return self
+
+
+# ── parsing the convention out of the markdown ───────────────────────────────
+
+
+@dataclass(frozen=True)
+class HypothesisParseError:
+    """One malformed hypothesis entry, named so a rejection can point at it."""
+
+    hypothesis_id: str
+    message: str
+
+
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
+
+
+def extract_hypotheses_section(markdown: str) -> str:
+    """Return the body of the Hypotheses section (between its heading and the next)."""
+    lines = markdown.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines):
+        if not _HEADING_RE.match(line):
+            continue
+        heading = line.lstrip("#").strip().lower()
+        if any(alias in heading for alias in HYPOTHESES_SECTION_ALIASES):
+            start = index + 1
+            break
+    if start is None:
+        return ""
+    body: list[str] = []
+    for line in lines[start:]:
+        if _HEADING_RE.match(line):
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+def _entry_lines(section: str) -> list[str]:
+    """List-item lines in a section body — one per hypothesis entry."""
+    entries: list[str] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if any(stripped.startswith(bullet) for bullet in HYPOTHESIS_BULLETS):
+            entries.append(stripped)
+    return entries
+
+
+def _parse_entry_fields(entry_line: str) -> dict[str, Any]:
+    """Parse one list-item line into a field dict per the convention."""
+    body = entry_line
+    for bullet in HYPOTHESIS_BULLETS:
+        if body.startswith(bullet):
+            body = body[len(bullet) :]
+            break
+    fields: dict[str, Any] = {}
+    for part in body.split(HYPOTHESIS_FIELD_SEP):
+        key, sep, value = part.partition(HYPOTHESIS_KV_SEP)
+        if not sep:
+            continue
+        key = key.strip().lower()
+        value = value.strip()
+        if not key:
+            continue
+        if key in ("supporting_evidence_ids", "refuting_evidence_ids", "depends_on"):
+            fields[key] = [v.strip() for v in value.split(HYPOTHESIS_ID_LIST_SEP) if v.strip()]
+        elif key == "inference_chain":
+            fields[key] = [v.strip() for v in value.split(HYPOTHESIS_CHAIN_SEP) if v.strip()]
+        else:
+            fields[key] = value
+    return fields
+
+
+def _first_error_message(exc: Exception) -> str:
+    """The most useful line from a pydantic ValidationError (or any error)."""
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        try:
+            details = errors()
+        except Exception:  # noqa: BLE001 - fall back to the string form
+            details = None
+        if details:
+            first = details[0]
+            loc = ".".join(str(part) for part in first.get("loc", ()))
+            msg = str(first.get("msg", "invalid"))
+            return f"{loc}: {msg}" if loc else msg
+    return str(exc)
+
+
+def parse_hypotheses(
+    markdown: str,
+    *,
+    known_evidence_ids: set[str] | None = None,
+) -> tuple[list[Hypothesis], list[HypothesisParseError]]:
+    """Parse the Hypotheses section into validated records plus per-entry errors.
+
+    Every list item in the section is a hypothesis entry and must satisfy the
+    convention (``id`` + ``basis`` + the basis-conditional field). ``known_evidence_ids``
+    is threaded into validation context: a set enforces evidence-id membership,
+    ``None`` skips resolution (shape is still checked). Prose paragraphs that are
+    not list items are ignored — the structured ledger is a later section.
+    """
+    section = extract_hypotheses_section(markdown)
+    context = {"known_evidence_ids": known_evidence_ids}
+    hypotheses: list[Hypothesis] = []
+    errors: list[HypothesisParseError] = []
+    for position, line in enumerate(_entry_lines(section), start=1):
+        raw = _parse_entry_fields(line)
+        label = str(raw.get("id") or f"entry #{position}")
+        try:
+            hypothesis = Hypothesis.model_validate(raw, context=context)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the caller as a named error
+            errors.append(HypothesisParseError(label, _first_error_message(exc)))
+        else:
+            hypotheses.append(hypothesis)
+    return hypotheses, errors
+
+
+def referenced_evidence_ids(markdown: str) -> list[str]:
+    """Every ``supporting_evidence_id`` referenced by a parseable hypothesis entry.
+
+    Best-effort and non-raising: used by the save path to resolve referenced ids
+    against the live proxy project before the authoritative parse. Entries that
+    do not parse are simply skipped here; the authoritative parse names them.
+    """
+    section = extract_hypotheses_section(markdown)
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for line in _entry_lines(section):
+        for raw in _parse_entry_fields(line).get("supporting_evidence_ids", []) or []:
+            token = str(raw).strip()
+            if token and token not in seen:
+                seen.add(token)
+                ordered.append(token)
+    return ordered
+
+
+__all__ = [
+    "BASIS_MARKER",
+    "HYPOTHESES_SECTION_ALIASES",
+    "HYPOTHESIS_BASIS_VALUES",
+    "HYPOTHESIS_CONVENTION",
+    "HYPOTHESIS_EXAMPLE",
+    "Confidence",
+    "Finding",
+    "FindingState",
+    "Hypothesis",
+    "HypothesisParseError",
+    "HypothesisState",
+    "parse_hypotheses",
+    "referenced_evidence_ids",
+]

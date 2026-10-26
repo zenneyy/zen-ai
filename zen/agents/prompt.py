@@ -7,13 +7,14 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from zen.agents.contract import render_contract
 from zen.skills import (
     find_deep_siblings,
     get_available_skills,
     load_skills,
     skill_search_dirs,
 )
-from zen.tools.detected_stack.tools import get_detected_skill_slugs, max_architecture_depth
+from zen.tools.detected_stack.tools import max_architecture_depth
 from zen.utils.resource_paths import get_zen_resource_path
 
 
@@ -21,6 +22,54 @@ logger = logging.getLogger(__name__)
 
 
 _PROMPT_DIRNAME = "prompts"
+
+# Persona skill var-name (the ``coordination/<x>_agent`` body in skill_content)
+# for each role whose CONTRACT is generated. The persona files carry METHOD only;
+# the CONTRACT is appended at render time from zen.agents.contract.
+_PERSONA_VAR_BY_ROLE = {
+    "root": "root_agent",
+    "recon": "recon_agent",
+    "hunter": "hunter_agent",
+}
+
+
+def _role_for_contract(*, is_root: bool, skill_content: dict[str, str]) -> str | None:
+    """Which role's CONTRACT (if any) to generate for this prompt.
+
+    Root is known from the flag; a recon/hunter child is known by the persona
+    body the skill resolver loaded. A role without a generated CONTRACT (or a
+    plain agent with no persona) returns ``None``.
+    """
+    if is_root:
+        return "root"
+    if _PERSONA_VAR_BY_ROLE["recon"] in skill_content:
+        return "recon"
+    if _PERSONA_VAR_BY_ROLE["hunter"] in skill_content:
+        return "hunter"
+    return None
+
+
+def _attach_generated_contract(skill_content: dict[str, str], *, is_root: bool) -> None:
+    """Append the role's generated CONTRACT to its persona METHOD body, in place.
+
+    The persona files are METHOD-only; this is the single point where the
+    obligations half is stitched on, so CONTRACT is never hand-written and never
+    drifts from the gates it describes.
+    """
+    role = _role_for_contract(is_root=is_root, skill_content=skill_content)
+    if role is None:
+        return
+    var = _PERSONA_VAR_BY_ROLE[role]
+    method = skill_content.get(var)
+    if not method:
+        return
+    try:
+        contract = render_contract(role)
+    except Exception:
+        # A contract-render bug must degrade to METHOD-only, never blank the whole prompt.
+        logger.exception("render_contract failed for role=%s; persona stays METHOD-only", role)
+        return
+    skill_content[var] = f"{method.rstrip()}\n\n{contract}"
 
 
 def _resolve_skills(
@@ -161,6 +210,7 @@ def render_system_prompt(
             scan_targets=scan_targets,
         )
         skill_content = load_skills(skills_to_load)
+        _attach_generated_contract(skill_content, is_root=is_root)
         env.globals["get_skill"] = lambda name: skill_content.get(name, "")
 
         rendered = env.get_template("system_prompt.jinja").render(

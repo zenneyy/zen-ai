@@ -160,6 +160,7 @@ class AgentCoordinator:
         *,
         task: str | None = None,
         skills: list[str] | None = None,
+        role: str = "generic",
     ) -> None:
         async with self._lock:
             self.statuses[agent_id] = "running"
@@ -169,10 +170,24 @@ class AgentCoordinator:
             self.metadata[agent_id] = {
                 "task": task or "",
                 "skills": list(skills or []),
+                "role": role,
             }
             self.runtimes.setdefault(agent_id, AgentRuntime())
-        logger.info("agent.register %s (%s) parent=%s", agent_id, name, parent_id or "-")
+        logger.info(
+            "agent.register %s (%s) parent=%s role=%s", agent_id, name, parent_id or "-", role
+        )
         await self._maybe_snapshot()
+
+    async def update_metadata(self, agent_id: str, **fields: Any) -> None:
+        """Merge ``fields`` into an agent's metadata (shared, run-scoped state).
+
+        Used to stash durable per-agent results the rest of the scan reads —
+        e.g. a hunter's typed hunt report at finish time. Creates the metadata
+        entry if the agent was never registered (defensive; registration
+        normally precedes any update).
+        """
+        async with self._lock:
+            self.metadata.setdefault(agent_id, {}).update(fields)
 
     async def attach_runtime(
         self,

@@ -354,6 +354,8 @@ async def spawn_child_agent(
     task: str,
     skills: list[str],
     parent_history: list[Any],
+    role: str = "generic",
+    hunt_task_block: str | None = None,
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -369,6 +371,7 @@ async def spawn_child_agent(
         parent_id,
         task=task,
         skills=skills,
+        role=role,
     )
 
     await _start_child_runner(
@@ -384,12 +387,14 @@ async def spawn_child_agent(
         name=name,
         parent_id=parent_id,
         task=task,
+        role=role,
         initial_input=child_initial_input(
             name=name,
             child_id=child_id,
             parent_id=parent_id,
             task=task,
             parent_history=parent_history,
+            hunt_task_block=hunt_task_block,
         ),
         event_sink=event_sink,
         hooks=hooks,
@@ -467,6 +472,7 @@ async def respawn_subagents(
                 name=name,
                 parent_id=parent_id,
                 task=str(md.get("task", "")),
+                role=str(md.get("role", "generic")),
                 initial_input=[],
                 start_parked=start_parked,
                 event_sink=event_sink,
@@ -1044,6 +1050,7 @@ async def _start_child_runner(
     parent_id: str | None,
     task: str,
     initial_input: Any,
+    role: str = "generic",
     start_parked: bool = False,
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
@@ -1056,6 +1063,10 @@ async def _start_child_runner(
     child_ctx["agent_id"] = child_id
     child_ctx["parent_id"] = parent_id
     child_ctx["task"] = task
+    # The child's own role governs role-specific finish behavior (a hunter owes a
+    # HuntReport at agent_finish). Always overwrite — never inherit the parent's
+    # role from the copied context.
+    child_ctx["role"] = role
 
     async def _child_loop() -> None:
         # A budget stop is a clean scan-wide shutdown, not a child failure: the

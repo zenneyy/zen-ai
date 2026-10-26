@@ -47,11 +47,8 @@ The tenant id is bound to the signed session and is not accepted from
 request parameters. Local CLI tooling is not deployed.
 
 ## Hypotheses
-A tenant may be able to read another tenant's invoices by manipulating
-resource identifiers in API calls (grounded: the REST surface accepts
-a resource id path parameter observed during enumeration). Local CLI
-tooling is not a realistic attack surface (assumed: no evidence of
-deployment).
+- id: H1 | basis: observed | mechanism: a tenant manipulates a resource identifier in an API call to read another tenant's records | predicted_observable: a record owned by a different tenant is returned | supporting_evidence_ids: 101, 102 | target_depth: discover | impact_objective: primitive | rationale: the REST surface accepts a resource id path parameter seen during enumeration
+- id: H2 | basis: assumed | mechanism: local CLI tooling is reachable as an attacker-facing surface | predicted_observable: the tooling is invocable by an unauthenticated actor | target_depth: confirm | impact_objective: reach | rationale: no evidence of deployment; recorded to note why it is not a realistic surface
 
 ## Severity Calibration
 Critical: cross-tenant write. High: cross-tenant read. Medium: authenticated
@@ -178,6 +175,29 @@ def test_rejects_model_missing_required_sections(tmp_path: Path) -> None:
     assert "severity calibration" in result["error"]
 
 
+def test_rejects_hypothesis_missing_basis_naming_it(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    broken = _MODEL.replace("basis: observed | ", "", 1)  # H1 loses its basis marker
+
+    result = _save_impl(str(repo), broken, None)
+
+    assert result["success"] is False
+    assert "H1" in result["error"]
+    assert "basis" in result["error"]
+
+
+def test_rejects_observed_hypothesis_without_evidence(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    # Strip H1's supporting_evidence_ids while keeping basis: observed.
+    broken = _MODEL.replace(" | supporting_evidence_ids: 101, 102", "", 1)
+
+    result = _save_impl(str(repo), broken, None)
+
+    assert result["success"] is False
+    assert "H1" in result["error"]
+    assert "supporting_evidence_id" in result["error"]
+
+
 def test_rejects_stub_model(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path)
 
@@ -245,16 +265,29 @@ def test_amend_rejects_a_stub(tmp_path: Path) -> None:
     assert _amend_impl(str(repo), "looks wrong", None)["success"] is False
 
 
-def test_save_clears_amendments_and_says_so(tmp_path: Path) -> None:
+def test_fold_in_save_carries_amendments_forward_without_losing_them(tmp_path: Path) -> None:
+    """Regression for the overwrite-clears-amendments DATA-LOSS hazard.
+
+    A save over a model with an outstanding amendment must preserve the
+    amendment's text rather than silently dropping it — the hazard being an
+    amendment another agent added since the saver last read the model.
+    """
     repo = _make_repo(tmp_path)
     _save_impl(str(repo), _MODEL, "root")
     _amend_impl(str(repo), _ADDENDUM, "agent-a")
 
+    # root rewrites the body without having seen agent-a's amendment.
     result = _save_impl(str(repo), _MODEL.replace("billing API", "billing service"), "root")
 
-    assert result["amendments_cleared"] == 1
-    assert "cleared" in result["message"]
-    assert "amendments" not in _get_impl(str(repo))
+    assert result["success"] is True
+    assert result["amendments_folded"] == 1
+    assert "carried forward" in result["message"]
+
+    got = _get_impl(str(repo))
+    # The amendment's content survives in the stored document — nothing is lost.
+    assert "api/webhooks.py:31" in got["content"]
+    # And it is no longer tracked as a separate, overwrite-prone amendment.
+    assert "amendments" not in got
 
 
 def test_amend_tool_is_registered() -> None:
@@ -429,10 +462,8 @@ backend are attacker-reachable. The edge service terminates TLS and
 forwards tenant-scoped sessions to the backend.
 
 ## Hypotheses
-An attacker may reach internal endpoints that the edge does not expose
-directly by targeting the forwarding path (grounded: the multi-hop
-architecture was observed during probing). Verbose error responses from
-the backend may leak internal structure (assumed: not yet observed).
+- id: H1 | basis: inferred_from_architecture | mechanism: an attacker reaches internal endpoints the edge does not expose directly by targeting the forwarding path | predicted_observable: an internal-only endpoint responds through the forwarding path | inference_chain: the documented multi-hop path forwards requests to an internal backend; the backend trusts the forwarded identity; a crafted request can traverse the forwarding path to the backend | target_depth: deep | impact_objective: chained | rationale: the multi-hop architecture was observed during probing
+- id: H2 | basis: assumed | mechanism: verbose error responses from the backend leak internal structure | predicted_observable: an error response discloses internal paths or versions | target_depth: discover | impact_objective: trigger | rationale: not yet observed
 
 ## Severity Calibration
 Critical: unauthenticated access to internal services. High: data leakage
@@ -467,6 +498,9 @@ def test_gate_rejects_when_indirect_service_has_no_discovery(
 
     assert result["success"] is False
     assert "indirectly-reached service" in result["error"]
+    # The rejection names the specific un-enumerated service (audit #6), not just
+    # the generic message — the name was previously only in the debug log.
+    assert "internal-backend" in result["error"]
 
 
 def test_gate_passes_when_discovery_command_was_run(
