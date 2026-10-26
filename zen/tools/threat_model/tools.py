@@ -25,18 +25,29 @@ import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from agents import RunContextWrapper, function_tool
 
 from zen.core.agents import AgentCoordinator
+from zen.tools.threat_model.implied_classes import (
+    IMPLIED_CLASS_GATE_DESCRIPTION,
+    Reason,
+    implied_classes,
+)
 from zen.tools.threat_model.schema import (
+    DISMISSAL_LINE_EXAMPLE,
     HYPOTHESES_SECTION_ALIASES,
     HYPOTHESIS_EXAMPLE,
+    parse_dismissed_classes,
     parse_hypotheses,
     referenced_evidence_ids,
 )
+
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
 
 
 logger = logging.getLogger(__name__)
@@ -431,6 +442,54 @@ def _unenumerated_indirect_services() -> list[str]:
     return missing
 
 
+def unaddressed_implied_classes(
+    content: str,
+    architecture: Mapping[str, Sequence[Mapping[str, str]]],
+) -> list[tuple[str, Reason]]:
+    """Architecture-implied classes the model neither hypothesizes nor dismisses.
+
+    The forcing function, as a pure, importable check so the save gate, the root
+    pre-hunt checkpoint, and the reasoning-regression probe all run the same
+    logic over the same source. For every class the architecture implies
+    (:func:`zen.tools.threat_model.implied_classes.implied_classes`), the model
+    must EITHER carry a hypothesis that names it (a parsed :class:`Hypothesis`
+    with that ``vuln_class``) OR a reasoned dismissal that names it. Any implied
+    class that is neither is returned together with the component or boundary that
+    implied it, sorted by class name for a stable message.
+
+    An empty architecture yields an empty list — the no-op that mirrors
+    :func:`_unenumerated_indirect_services`' empty-input behavior, so the gate
+    never fires on empty state and produces no false positives.
+    """
+    implied = implied_classes(architecture)
+    if not implied:
+        return []
+    hypotheses, _ = parse_hypotheses(content)
+    dismissals, _ = parse_dismissed_classes(content)
+    addressed = {h.vuln_class for h in hypotheses if h.vuln_class}
+    addressed |= {d.vuln_class for d in dismissals}
+    return sorted(
+        ((name, reason) for name, reason in implied.items() if name not in addressed),
+        key=lambda item: item[0],
+    )
+
+
+def _live_architecture() -> dict[str, list[dict[str, str]]]:
+    """Snapshot the detected-architecture store under its lock."""
+    from zen.tools.detected_stack import tools as stack_tools
+
+    with stack_tools._store_lock:
+        return {
+            identity: list(hops)
+            for identity, hops in stack_tools._DETECTED_ARCHITECTURE.items()
+        }
+
+
+def _unaddressed_implied_classes(content: str) -> list[tuple[str, Reason]]:
+    """Run the completeness gate against the live detected-architecture store."""
+    return unaddressed_implied_classes(content, _live_architecture())
+
+
 def _render_carried_forward_amendments(amendments: list[dict[str, Any]]) -> str:
     """Render outstanding amendments as a trailing block so a save never drops them.
 
@@ -542,6 +601,32 @@ def _save_impl(  # noqa: PLR0911
                 "request, an internal network link, a redirect revealing an internal host, "
                 "discovered credentials, or any other indirect path — before finalizing the "
                 "threat model."
+            ),
+        }
+
+    # Architecture-implied-classes completeness gate (runs after the discovery
+    # gate so a model that fails both still surfaces the discovery message first,
+    # preserving that gate's named-service rejection). Every class the registered
+    # architecture implies must be either hypothesized (a hypothesis naming it via
+    # vuln_class) or explicitly dismissed with a reason — a class implied purely by
+    # structure can no longer be silently dropped from the hypothesis set.
+    unaddressed = _unaddressed_implied_classes(body)
+    if unaddressed:
+        named = "; ".join(f"{name} (implied by {reason.source})" for name, reason in unaddressed)
+        logger.debug(
+            "threat_model rejected — architecture-implied class(es) neither hypothesized "
+            "nor dismissed: %s",
+            [(name, reason.text) for name, reason in unaddressed],
+        )
+        return {
+            "success": False,
+            "error": (
+                "Hypotheses: architecture-implied vulnerability class(es) were neither "
+                f"hypothesized nor dismissed: {named}. {IMPLIED_CLASS_GATE_DESCRIPTION} For each, "
+                "add an inferred_from_architecture hypothesis that names it (set its "
+                "`vuln_class:` field), or record a reasoned dismissal under a 'Dismissed "
+                f"Implied Classes' section (`{DISMISSAL_LINE_EXAMPLE}`). A class the structure "
+                "implies must be enumerated, not silently omitted."
             ),
         }
 
@@ -798,7 +883,13 @@ async def save_threat_model(ctx: RunContextWrapper, target: str, content: str) -
       policy engines may disagree.  After documenting the stages, state
       which attack classes the architecture itself implies and carry
       those into the Hypotheses section as architecture-grounded
-      hypotheses.
+      hypotheses.  Every class the registered architecture implies — by
+      a component's role or by a boundary between adjacent components —
+      must be addressed before the model is accepted: name it in a
+      hypothesis (see below) or dismiss it with a reason.  The save
+      rejects, naming the class and the component or boundary that
+      implied it, if any implied class is left neither hypothesized nor
+      dismissed.
     - **Trust Boundaries and Assumptions** — the boundaries, the actors
       on either side, and the invariants that must hold. Separate
       attacker-controlled, operator-controlled, and
@@ -820,10 +911,16 @@ async def save_threat_model(ctx: RunContextWrapper, target: str, content: str) -
       *assumed* (a reasonable suspicion not yet backed by a direct
       observation).  Include the attack classes the architecture
       implies, hypotheses about which surfaces are most exposed,
-      and scenarios that are *not* realistic here and why.  Do not
-      rank or sequence hypotheses into an attack plan — report
-      them as a set, each with its basis, so the consuming agent
-      can form its own priorities from the evidence.
+      and scenarios that are *not* realistic here and why.  Name the
+      vulnerability class a hypothesis prosecutes with a `vuln_class:`
+      field, so the completeness gate can see which architecture-implied
+      classes the model has covered.  An architecture-implied class you
+      judge not worth a hypothesis is dismissed deliberately, not
+      omitted silently: record it under a `## Dismissed Implied Classes`
+      section, one line per class, `- vuln_class: <class> | reason:
+      <why it does not apply here>`.  Do not rank or sequence hypotheses
+      into an attack plan — report them as a set, each with its basis, so
+      the consuming agent can form its own priorities from the evidence.
     - **Severity Calibration** — what critical / high / medium / low
       look like for *this* target, with a concrete example at each
       level. Where a vulnerability class needs attacker control that

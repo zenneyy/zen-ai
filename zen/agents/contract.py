@@ -33,7 +33,9 @@ from zen.tools.agents_graph.tools import AgentRole, agent_finish, create_agent
 from zen.tools.coverage.tools import list_coverage, record_coverage
 from zen.tools.finish.tool import finish_scan
 from zen.tools.reporting.tool import create_vulnerability_report
+from zen.tools.threat_model.implied_classes import IMPLIED_CLASS_GATE_DESCRIPTION
 from zen.tools.threat_model.schema import (
+    DISMISSAL_LINE_EXAMPLE,
     HYPOTHESIS_BASIS_VALUES,
     HYPOTHESIS_CONVENTION,
 )
@@ -241,6 +243,18 @@ def _recon_requirements() -> list[ContractRequirement]:
                 "link, a redirect, or discovered credentials) must have a content/route "
                 "discovery pass logged before the model is accepted; the save names any service "
                 "that does not."
+            ),
+        ),
+        ContractRequirement(
+            key="architecture-implied class",
+            group="gates",
+            text=(
+                f"{IMPLIED_CLASS_GATE_DESCRIPTION} Address every architecture-implied class "
+                "before the model is accepted: name it in an `inferred_from_architecture` "
+                "hypothesis (set its `vuln_class:` field), or record a reasoned dismissal under "
+                f"a 'Dismissed Implied Classes' section (`{DISMISSAL_LINE_EXAMPLE}`). The save "
+                "rejects, naming the class and the component or boundary that implied it, if any "
+                "implied class is left neither hypothesized nor dismissed."
             ),
         ),
     ]

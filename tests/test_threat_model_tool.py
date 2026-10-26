@@ -10,6 +10,7 @@ import pytest
 
 from zen.agents.factory import _BASE_TOOLS
 from zen.tools.threat_model import tools as threat_model_tools
+from zen.tools.threat_model.implied_classes import implied_classes
 from zen.tools.threat_model.tools import (
     _amend_impl,
     _get_impl,
@@ -73,10 +74,20 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _empty_store() -> None:
-    """Each test is its own run, so it starts with an empty, unmirrored store."""
+def _empty_store() -> Iterator[None]:
+    """Each test is its own run, so it starts with an empty, unmirrored store.
+
+    Cleared on teardown too: ``finish_scan``'s closure gate (item 1.5) reads this
+    store, so a saved model with open hypotheses must not leak into a later test's
+    finish path.
+    """
     threat_model_tools._MODELS.clear()
     threat_model_tools._store_path = None
+    try:
+        yield
+    finally:
+        threat_model_tools._MODELS.clear()
+        threat_model_tools._store_path = None
 
 
 def test_missing_model_reports_not_found(tmp_path: Path) -> None:
@@ -471,6 +482,27 @@ across trust boundaries. Medium: verbose errors exposing internals.
 """
 
 
+def _completeness_dismissals(hops: list[dict[str, str]]) -> str:
+    """A Dismissed Implied Classes section covering every class *hops* implies.
+
+    The architecture-implied-classes completeness gate (item 1.5) runs after the
+    discovery gate on any save with a registered architecture, so these
+    discovery-gate fixtures must also satisfy completeness. Dismissing every
+    implied class is the minimal way to do that without pinning these tests to the
+    specific classes the mapping emits, so they keep exercising the discovery
+    gate, not the completeness gate.
+    """
+    implied = implied_classes({"https://app.example.com": hops})
+    if not implied:
+        return ""
+    lines = ["", "## Dismissed Implied Classes", ""]
+    lines += [
+        f"- vuln_class: {name} | reason: out of scope for this reconnaissance fixture"
+        for name in sorted(implied)
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def test_gate_rejects_when_indirect_service_has_no_discovery(
     _isolate_command_and_arch_stores: None,
 ) -> None:
@@ -509,12 +541,13 @@ def test_gate_passes_when_discovery_command_was_run(
     import zen.tools.command_log.tools as cmd_mod
     import zen.tools.detected_stack.tools as stack_mod
 
+    hops = [
+        {"name": "edge-service", "role": "entry point"},
+        {"name": "internal-backend", "role": "application handler"},
+    ]
     stack_mod._register_architecture_impl(
         "https://app.example.com",
-        hops=[
-            {"name": "edge-service", "role": "entry point"},
-            {"name": "internal-backend", "role": "application handler"},
-        ],
+        hops=hops,
         scan_targets=["https://app.example.com"],
     )
     cmd_mod.record_command(
@@ -522,8 +555,10 @@ def test_gate_passes_when_discovery_command_was_run(
         "-w /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
     )
 
+    # Satisfy the completeness gate (runs after discovery) so this test exercises
+    # only the discovery gate.
     result = _save_impl(
-        "https://app.example.com", _GATE_MODEL, "root",
+        "https://app.example.com", _GATE_MODEL + _completeness_dismissals(hops), "root",
         scan_targets=["https://app.example.com"],
     )
 
@@ -535,14 +570,15 @@ def test_gate_ignores_single_hop_architecture(
 ) -> None:
     import zen.tools.detected_stack.tools as stack_mod
 
+    hops = [{"name": "only-service", "role": "standalone"}]
     stack_mod._register_architecture_impl(
         "https://app.example.com",
-        hops=[{"name": "only-service", "role": "standalone"}],
+        hops=hops,
         scan_targets=["https://app.example.com"],
     )
 
     result = _save_impl(
-        "https://app.example.com", _GATE_MODEL, "root",
+        "https://app.example.com", _GATE_MODEL + _completeness_dismissals(hops), "root",
         scan_targets=["https://app.example.com"],
     )
 

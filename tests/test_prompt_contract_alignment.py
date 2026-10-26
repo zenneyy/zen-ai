@@ -43,6 +43,8 @@ from zen.skills import _INTERNAL_SKILL_CATEGORIES, validate_requested_skills
 from zen.tools.agents_graph.contracts import HuntBasis, HuntTask
 from zen.tools.coverage.tools import record_coverage
 from zen.tools.finish.tool import finish_scan
+from zen.tools.threat_model.implied_classes import IMPLIED_CLASS_GATE_DESCRIPTION
+from zen.tools.threat_model.schema import DISMISSAL_LINE_EXAMPLE
 from zen.tools.threat_model.tools import _REQUIRED_SECTIONS
 from zen.utils.resource_paths import get_zen_resource_path
 
@@ -108,6 +110,19 @@ def test_recon_contract_names_the_basis_enum_and_the_hypothesis_convention() -> 
 
 def test_recon_contract_names_the_discovery_pass_gate() -> None:
     assert "discovery pass" in render_contract("recon")
+
+
+def test_recon_contract_names_the_architecture_implied_completeness_gate() -> None:
+    """The item-1.5 completeness gate is surfaced in recon's CONTRACT, sourced
+    from the same description and dismissal grammar the save gate enforces."""
+    contract = render_contract("recon")
+    assert "architecture-implied class" in contract
+    # Both ways to address an implied class are taught, from the live sources.
+    assert "inferred_from_architecture" in contract
+    assert "vuln_class:" in contract
+    assert DISMISSAL_LINE_EXAMPLE in contract
+    # The teaching text is the gate's own description (single source, no drift).
+    assert IMPLIED_CLASS_GATE_DESCRIPTION in contract
 
 
 def test_hunter_contract_surfaces_the_reports_required_fields() -> None:

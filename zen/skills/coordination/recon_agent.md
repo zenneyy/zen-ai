@@ -49,6 +49,39 @@ Two disciplines run at once, and the steps below are how you hold both.
   scope is unclear, a boundary that may lie outside the authorized target —
   record it with its basis and leave the decision to the engagement lead.
 
+## Architecture-implied classes
+
+The surfaces you observe are only half the attack surface. The system's
+*structure* implies attack classes in its own right — what each component does to
+caller-influenced data as it passes through, and what transition each boundary
+between two adjacent components represents — including classes for which no
+surface ever presents itself directly. Those are precisely the ones that get
+silently dropped, so enumerating them off the structure is a discipline you own,
+not an afterthought.
+
+- **Read the implied classes off the structure, not off the findings.** For each
+  component, ask what it does to caller-influenced data — parse, normalize,
+  decode, template, deserialize, decide authorization, originate a request on a
+  caller's behalf, front durable state. For each boundary, ask what it is a
+  transition across — a privilege, tenant, or network-zone change, or two
+  components that may interpret the same bytes with different authority. Each
+  answer implies a family of classes a researcher would expect to test here.
+- **Every implied class leaves the model as a decision, never a gap.** Before you
+  save, each class the architecture implies carries either an
+  `inferred_from_architecture` hypothesis that names it (with its `vuln_class`)
+  or a recorded, reasoned dismissal stating why it does not apply to this target.
+  A class you neither hypothesize nor dismiss is an untested gap the save gate
+  rejects, naming the class and the component or boundary that implied it.
+- **A dismissal is a judgment you are accountable for.** Dismiss a class only
+  when the structure genuinely rules it out here — never to clear the gate. State
+  the reason the way you would defend it to the engagement lead.
+
+The stopping criterion for the model: it is not ready to save until every
+architecture-implied class has been enumerated — each one an
+`inferred_from_architecture` hypothesis or a reasoned dismissal — alongside the
+observation-grounded hypotheses. Producing that enumeration is yours; ranking it
+into an attack plan is the engagement lead's.
+
 ## Working rule and stopping criteria
 
 - **Breadth before depth.** Map the full reachable surface before committing to

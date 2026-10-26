@@ -73,6 +73,15 @@ target is the most common cause of coverage gaps.
   own right; a class that never enters the hypotheses cannot be assessed, however
   clearly the architecture suggests it. Weigh each on its merits alongside
   observation-derived evidence.
+- **Run the architecture-implied-classes completeness check as a pre-hunt
+  checkpoint.** Recon owns producing, for every class the architecture implies,
+  either an `inferred_from_architecture` hypothesis that names it or a reasoned
+  dismissal; **you own ranking them**. Before you scope any hunter, confirm the
+  model leaves no implied class unaddressed — the same check the threat-model
+  save enforces — then rank the `inferred_from_architecture` hypotheses *alongside*
+  the observed ones, never discounting a class merely because no surface for it
+  was directly observed. An implied class left unaddressed is a hole in the plan;
+  a reasoned dismissal is a decision to respect, not re-litigate.
 - **Scope chain-aware hunters for internal services.** Where an internal service
   is reachable only via a server-side request from a public one, scope a hunter
   that starts at the public surface and treats the internal service as a

@@ -38,10 +38,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from zen.skills import get_vulnerability_class_names
 from zen.tools.agents_graph.contracts import DepthTier, HuntBasis, ImpactRung
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from pydantic import ValidationInfo
 
 
@@ -203,6 +206,15 @@ class Hypothesis(BaseModel):
     the claim is*, NOT a difficulty tier and NOT a depth tier; it places no
     ceiling on the technique the hunt may require."""
 
+    vuln_class: str = ""
+    """The vulnerability class this hypothesis prosecutes, drawn from the shipped
+    ``vulnerabilities/*`` catalog (e.g. ``idor``, ``ssrf``). Optional in general,
+    but it is how a hypothesis *names* the class it covers, so the
+    architecture-implied-classes completeness gate can tell which implied classes
+    the model has addressed. Independent of ``basis``: an architecture-implied
+    class is typically carried as a ``basis: inferred_from_architecture``
+    hypothesis with its ``vuln_class`` set, but any basis may name a class."""
+
     mechanism: str = ""
     """How the weakness would work — the causal story from attacker-controlled
     input to the consequence, at whatever depth the claim warrants."""
@@ -272,6 +284,26 @@ class Hypothesis(BaseModel):
     @classmethod
     def _evidence_shape(cls, value: list[str]) -> list[str]:
         return _validate_evidence_ids(value)
+
+    @field_validator("vuln_class")
+    @classmethod
+    def _known_vuln_class(cls, value: str) -> str:
+        """When named, the class must be one the shipped catalog carries.
+
+        Mirrors :meth:`HuntTask._one_known_class`: an empty value is allowed
+        (naming a class is optional), and when the catalog cannot be read the
+        membership check is skipped rather than rejecting every class.
+        """
+        value = value.strip()
+        if not value:
+            return value
+        allowed = get_vulnerability_class_names()
+        if allowed and value not in allowed:
+            raise ValueError(
+                f"vuln_class {value!r} is not a known vulnerability class; draw it from the "
+                f"vulnerabilities/* catalog: {sorted(allowed)}"
+            )
+        return value
 
     @model_validator(mode="after")
     def _check_grounding(self, info: ValidationInfo) -> Hypothesis:
@@ -389,15 +421,21 @@ class HypothesisParseError:
 _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
 
 
-def extract_hypotheses_section(markdown: str) -> str:
-    """Return the body of the Hypotheses section (between its heading and the next)."""
+def extract_section_body(markdown: str, aliases: Sequence[str]) -> str:
+    """Return the body of the first section whose heading matches an alias.
+
+    The body runs from just after the matched heading to the next heading of any
+    level, so a subsection heading terminates it — which is what keeps a
+    dedicated ``Dismissed Implied Classes`` or ``Deferred Hypotheses`` block out
+    of the Hypotheses body even when it sits directly beneath it.
+    """
     lines = markdown.splitlines()
     start: int | None = None
     for index, line in enumerate(lines):
         if not _HEADING_RE.match(line):
             continue
         heading = line.lstrip("#").strip().lower()
-        if any(alias in heading for alias in HYPOTHESES_SECTION_ALIASES):
+        if any(alias in heading for alias in aliases):
             start = index + 1
             break
     if start is None:
@@ -408,6 +446,11 @@ def extract_hypotheses_section(markdown: str) -> str:
             break
         body.append(line)
     return "\n".join(body)
+
+
+def extract_hypotheses_section(markdown: str) -> str:
+    """Return the body of the Hypotheses section (between its heading and the next)."""
+    return extract_section_body(markdown, HYPOTHESES_SECTION_ALIASES)
 
 
 def _entry_lines(section: str) -> list[str]:
@@ -509,18 +552,155 @@ def referenced_evidence_ids(markdown: str) -> list[str]:
     return ordered
 
 
+# ── reasoned dismissals and deferrals (same grammar, dedicated sections) ──────
+#
+# Two more records live in the threat-model markdown, each parsed out of its own
+# section using the *same* list-item grammar a hypothesis is written in (so there
+# is one grammar, not a parallel one):
+#
+# * A **reasoned dismissal** records that an architecture-implied class was
+#   deliberately judged not worth a hypothesis here, and why — the deliberate,
+#   recorded alternative to silently omitting it. It satisfies the
+#   architecture-implied-classes completeness gate alongside a hypothesis that
+#   names the class.
+# * A **deferral** records that an open/blocked hypothesis is being carried
+#   forward explicitly rather than dropped — the recorded disposition the closure
+#   gate accepts in place of a terminal (confirmed/refuted) state.
+#
+# Both sit in their own heading so they never parse as hypotheses, and both reuse
+# ``_entry_lines`` + ``_parse_entry_fields``.
+
+
+def _section_records(markdown: str, aliases: Sequence[str]) -> list[dict[str, Any]]:
+    """List-item field dicts from a section, reusing the hypothesis line grammar."""
+    section = extract_section_body(markdown, aliases)
+    return [_parse_entry_fields(line) for line in _entry_lines(section)]
+
+
+DISMISSED_CLASSES_SECTION_ALIASES: tuple[str, ...] = (
+    "dismissed implied classes",
+    "dismissed architecture-implied classes",
+    "reasoned dismissals",
+)
+"""Headings that name the reasoned-dismissals section."""
+
+DISMISSAL_LINE_EXAMPLE = (
+    "- vuln_class: <class> | reason: <why this architecture-implied class is not "
+    "applicable to this target>"
+)
+"""The dismissal grammar, shown verbatim in the generated CONTRACT and gate
+rejections so the grammar taught is the grammar parsed."""
+
+
+@dataclass(frozen=True)
+class ClassDismissal:
+    """One deliberately-recorded dismissal of an architecture-implied class."""
+
+    vuln_class: str
+    reason: str
+
+
+def parse_dismissed_classes(
+    markdown: str,
+) -> tuple[list[ClassDismissal], list[HypothesisParseError]]:
+    """Parse the reasoned-dismissals section into validated records plus errors.
+
+    A dismissal names a ``vuln_class`` (which must be a known catalog class) and a
+    non-empty ``reason``. A dismissal with neither — or an unknown class — is a
+    malformed entry, named so the save gate can point at it.
+    """
+    allowed = get_vulnerability_class_names()
+    dismissals: list[ClassDismissal] = []
+    errors: list[HypothesisParseError] = []
+    records = _section_records(markdown, DISMISSED_CLASSES_SECTION_ALIASES)
+    for position, raw in enumerate(records, 1):
+        vuln_class = str(raw.get("vuln_class", "")).strip()
+        reason = str(raw.get("reason", "")).strip()
+        label = vuln_class or f"dismissal #{position}"
+        if not vuln_class:
+            errors.append(HypothesisParseError(label, "a dismissal must name a vuln_class"))
+        elif allowed and vuln_class not in allowed:
+            errors.append(
+                HypothesisParseError(
+                    label, f"vuln_class {vuln_class!r} is not a known vulnerability class"
+                )
+            )
+        elif not reason:
+            errors.append(
+                HypothesisParseError(label, "a dismissal must carry a non-empty reason")
+            )
+        else:
+            dismissals.append(ClassDismissal(vuln_class=vuln_class, reason=reason))
+    return dismissals, errors
+
+
+DEFERRED_HYPOTHESES_SECTION_ALIASES: tuple[str, ...] = (
+    "deferred hypotheses",
+    "carried-forward hypotheses",
+    "hypothesis dispositions",
+)
+"""Headings that name the deferrals section (the closure gate's disposition record)."""
+
+DEFERRAL_LINE_EXAMPLE = (
+    "- hypothesis_id: <id> | reason: <why this lead is carried forward rather than resolved>"
+)
+"""The deferral grammar, shown verbatim in the closure-gate rejection."""
+
+
+@dataclass(frozen=True)
+class HypothesisDeferral:
+    """One open/blocked hypothesis explicitly carried forward at scan close."""
+
+    hypothesis_id: str
+    reason: str
+
+
+def parse_deferrals(
+    markdown: str,
+) -> tuple[list[HypothesisDeferral], list[HypothesisParseError]]:
+    """Parse the deferrals section into validated records plus per-entry errors.
+
+    A deferral names the ``hypothesis_id`` being carried forward and a non-empty
+    ``reason``. It is the recorded disposition the closure gate accepts for a
+    hypothesis left in an open/blocked state.
+    """
+    deferrals: list[HypothesisDeferral] = []
+    errors: list[HypothesisParseError] = []
+    records = _section_records(markdown, DEFERRED_HYPOTHESES_SECTION_ALIASES)
+    for position, raw in enumerate(records, 1):
+        hypothesis_id = str(raw.get("hypothesis_id", "")).strip()
+        reason = str(raw.get("reason", "")).strip()
+        label = hypothesis_id or f"deferral #{position}"
+        if not hypothesis_id:
+            errors.append(HypothesisParseError(label, "a deferral must name a hypothesis_id"))
+        elif not reason:
+            errors.append(HypothesisParseError(label, "a deferral must carry a non-empty reason"))
+        else:
+            deferrals.append(HypothesisDeferral(hypothesis_id=hypothesis_id, reason=reason))
+    return deferrals, errors
+
+
 __all__ = [
     "BASIS_MARKER",
+    "DEFERRAL_LINE_EXAMPLE",
+    "DEFERRED_HYPOTHESES_SECTION_ALIASES",
+    "DISMISSAL_LINE_EXAMPLE",
+    "DISMISSED_CLASSES_SECTION_ALIASES",
     "HYPOTHESES_SECTION_ALIASES",
     "HYPOTHESIS_BASIS_VALUES",
     "HYPOTHESIS_CONVENTION",
     "HYPOTHESIS_EXAMPLE",
+    "ClassDismissal",
     "Confidence",
     "Finding",
     "FindingState",
     "Hypothesis",
+    "HypothesisDeferral",
     "HypothesisParseError",
     "HypothesisState",
+    "extract_section_body",
+    "parse_deferrals",
+    "parse_dismissed_classes",
     "parse_hypotheses",
     "referenced_evidence_ids",
 ]
