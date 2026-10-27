@@ -78,6 +78,9 @@ tensorboard/
 zen_runs/
 agent_runs/
 
+# Eval harness per-seed artifacts + scorecards (evals/runner output)
+eval_runs/
+
 # Misc
 *.log
 *.sqlite
