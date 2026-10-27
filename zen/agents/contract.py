@@ -36,6 +36,8 @@ from zen.tools.reporting.tool import create_vulnerability_report
 from zen.tools.threat_model.implied_classes import IMPLIED_CLASS_GATE_DESCRIPTION
 from zen.tools.threat_model.schema import (
     DISMISSAL_LINE_EXAMPLE,
+    DISPOSITION_CONVENTION,
+    DISPOSITION_LINE_EXAMPLE,
     HYPOTHESIS_BASIS_VALUES,
     HYPOTHESIS_CONVENTION,
 )
@@ -257,6 +259,14 @@ def _recon_requirements() -> list[ContractRequirement]:
                 "implied class is left neither hypothesized nor dismissed."
             ),
         ),
+        ContractRequirement(
+            key="disposition",
+            group="gates",
+            text=(
+                f"{DISPOSITION_CONVENTION} A hypothesis left open or blocked with no disposition "
+                f"blocks the scan from finishing and is named (`{DISPOSITION_LINE_EXAMPLE}`)."
+            ),
+        ),
     ]
 
 
@@ -324,6 +334,16 @@ def _root_requirements() -> list[ContractRequirement]:
             text=(
                 "A hunt's `impact_objective` names a rung on the impact ladder "
                 f"({impact_ladder}) — consequence, not difficulty."
+            ),
+        ),
+        ContractRequirement(
+            key="closure gate",
+            group="gates",
+            text=(
+                "The closure gate on `finish_scan` refuses while any threat-model hypothesis is "
+                f"left open or blocked with no recorded disposition. {DISPOSITION_CONVENTION} "
+                "Resolve each open/blocked lead to a terminal state, give it an inline disposition "
+                f"(`{DISPOSITION_LINE_EXAMPLE}`), or defer it, before you finish."
             ),
         ),
     ]

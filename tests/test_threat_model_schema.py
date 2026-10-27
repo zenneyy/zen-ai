@@ -18,8 +18,10 @@ from zen.tools.agents_graph.contracts import HuntBasis
 from zen.tools.threat_model.schema import (
     HYPOTHESIS_BASIS_VALUES,
     HYPOTHESIS_CONVENTION,
+    HYPOTHESIS_DISPOSITION_VALUES,
     Finding,
     Hypothesis,
+    HypothesisDisposition,
     parse_hypotheses,
     referenced_evidence_ids,
 )
@@ -192,3 +194,60 @@ def test_convention_describe_mentions_basis_and_the_conditional_fields() -> None
     assert "inference_chain" in described
     # The grounding-vs-depth distinction is stated, not implied.
     assert "not a difficulty" in described or "not in `basis`" in described
+
+
+# --- hypothesis disposition: the inline closure-gate channel ---------------------
+
+
+def test_disposition_values_are_a_small_class_agnostic_set() -> None:
+    # One source: the tuple is derived from the Literal, so they cannot diverge.
+    assert get_args(HypothesisDisposition) == HYPOTHESIS_DISPOSITION_VALUES
+    assert set(HYPOTHESIS_DISPOSITION_VALUES) == {
+        "deferred",
+        "accepted_risk",
+        "out_of_scope",
+        "resolved_elsewhere",
+    }
+
+
+def test_disposition_is_optional_and_unset_by_default() -> None:
+    # A hypothesis needs no disposition; confirmed/refuted/testing never do.
+    assert Hypothesis(id="H", basis="assumed").disposition is None
+
+
+@pytest.mark.parametrize(
+    ("written", "canonical"),
+    [
+        ("deferred", "deferred"),
+        ("Deferred", "deferred"),
+        ("accepted-risk", "accepted_risk"),
+        ("Out Of Scope", "out_of_scope"),
+        ("resolved_elsewhere", "resolved_elsewhere"),
+    ],
+)
+def test_disposition_normalizes_organic_spellings(written: str, canonical: str) -> None:
+    assert Hypothesis(id="H", basis="assumed", disposition=written).disposition == canonical
+
+
+def test_blank_disposition_is_unset_not_an_error() -> None:
+    # An empty value means the field was left blank — no disposition, not a bad one.
+    assert Hypothesis(id="H", basis="assumed", disposition="").disposition is None
+
+
+def test_unknown_disposition_is_rejected_listing_valid_values() -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        Hypothesis(id="H", basis="assumed", disposition="maybe_later")
+    message = str(excinfo.value)
+    assert "disposition" in message
+    assert "deferred" in message
+
+
+def test_parse_hypotheses_reads_an_inline_disposition() -> None:
+    hyps, errors = parse_hypotheses(
+        "## Hypotheses\n"
+        "- id: H1 | basis: assumed | state: open | disposition: deferred | "
+        "disposition_reason: carried forward\n"
+    )
+    assert errors == []
+    assert hyps[0].disposition == "deferred"
+    assert hyps[0].disposition_reason == "carried forward"

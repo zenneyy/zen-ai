@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -145,6 +145,54 @@ HYPOTHESIS_CONVENTION = _HypothesisConventionSpec(
 
 # The basis values, surfaced as a tuple for the CONTRACT and alignment test.
 HYPOTHESIS_BASIS_VALUES: tuple[str, ...] = ("observed", "inferred_from_architecture", "assumed")
+
+
+# ── hypothesis disposition (how an open/blocked lead is handled at closure) ───
+#
+# A hypothesis left ``open`` or ``blocked`` at scan close is not dropped in
+# silence — it carries an explicit *disposition* recording how the lead was
+# handled. This is the low-friction, INLINE channel: a ``disposition:`` field
+# written straight onto the hypothesis line, which is what an agent reaches for
+# first. It sits alongside the dedicated ``## Deferred Hypotheses`` section
+# further down; both record the same thing and both satisfy the finish-time
+# closure gate. The values live here once, so the :class:`Hypothesis` validator,
+# the closure gate in ``finish_scan``, and the generated persona CONTRACT read a
+# single definition and cannot drift.
+#
+# The values are generic and class-agnostic: they describe *how a lead was
+# handled*, never a vulnerability class and never a difficulty.
+
+HypothesisDisposition = Literal["deferred", "accepted_risk", "out_of_scope", "resolved_elsewhere"]
+"""How an open/blocked hypothesis was handled at closure:
+
+* ``deferred`` — carried forward for later work (needs access, time, or a
+  precondition not met this engagement);
+* ``accepted_risk`` — acknowledged and accepted without further prosecution;
+* ``out_of_scope`` — judged to lie outside this engagement's scope;
+* ``resolved_elsewhere`` — handled by another hypothesis, finding, or report.
+
+A ``confirmed`` / ``refuted`` hypothesis is already terminal and needs none."""
+
+HYPOTHESIS_DISPOSITION_VALUES: tuple[str, ...] = get_args(HypothesisDisposition)
+"""The disposition values as a tuple — surfaced for the CONTRACT, the closure-gate
+message, and the alignment test. Derived from the Literal so there is one source."""
+
+DISPOSITION_LINE_EXAMPLE = (
+    "- id: <id> | basis: <basis> | ... | state: blocked | disposition: deferred | "
+    "disposition_reason: <why this open/blocked lead is carried forward rather than resolved now>"
+)
+"""The inline-disposition grammar, shown verbatim in the generated CONTRACT and the
+closure-gate rejection so the grammar taught is the grammar the gate reads."""
+
+DISPOSITION_CONVENTION = (
+    "A hypothesis left `state: open` or `state: blocked` at scan close records how the lead "
+    "was handled with an inline `disposition:` field on its own hypothesis line — one of "
+    f"{', '.join(HYPOTHESIS_DISPOSITION_VALUES)} (optionally a free-text `disposition_reason:`). "
+    "A `confirmed` or `refuted` hypothesis is already terminal and needs none; a dedicated "
+    "`## Deferred Hypotheses` record carries the same disposition where that reads more naturally."
+)
+"""One class-agnostic statement of the disposition rule, consumed by the closure-gate
+rejection and the generated CONTRACT so the teaching and the enforcement are one source."""
 
 
 # ── evidence-id shape ────────────────────────────────────────────────────────
@@ -276,6 +324,24 @@ class Hypothesis(BaseModel):
     progress), ``confirmed``, ``refuted``, or ``blocked`` (needs access or a
     precondition that is not yet met)."""
 
+    disposition: HypothesisDisposition | None = None
+    """How this lead was handled when it is left ``open``/``blocked`` at scan
+    close — one of :data:`HYPOTHESIS_DISPOSITION_VALUES`. This is the inline,
+    low-friction channel the finish-time closure gate accepts in place of a
+    terminal (``confirmed``/``refuted``) state or a dedicated
+    ``## Deferred Hypotheses`` record: an open/blocked hypothesis that carries a
+    disposition counts as handled; one that carries none blocks the scan from
+    finishing and is named. It records *how the lead was handled*, never a
+    vulnerability class, and a terminal hypothesis needs none. Organic spellings
+    (``Deferred``, ``accepted-risk``, ``out of scope``) are normalized onto the
+    canonical token, and a blank value is treated as unset, not as an error."""
+
+    disposition_reason: str = ""
+    """Free-text reason for the ``disposition`` — why this open/blocked lead is
+    carried forward, accepted, scoped out, or resolved elsewhere. Advisory for the
+    reader and strongly encouraged, but optional: the typed ``disposition`` is
+    what the closure gate reads."""
+
     rationale: str = ""
     """Free-text reasoning for the model's benefit — context, not contract; the
     typed fields above are what the gate reads."""
@@ -304,6 +370,25 @@ class Hypothesis(BaseModel):
                 f"vulnerabilities/* catalog: {sorted(allowed)}"
             )
         return value
+
+    @field_validator("disposition", mode="before")
+    @classmethod
+    def _normalize_disposition(cls, value: object) -> str | None:
+        """Accept the disposition in whatever spelling it was written; blank → unset.
+
+        The field is typed by a hand-written markdown line, so it arrives however
+        the author spelled it — ``Deferred``, ``accepted-risk``, ``out of scope``.
+        Lower-casing and folding spaces and hyphens onto underscores accepts those;
+        a blank value means the field was left empty, which is *no disposition*
+        (``None``), not an error. A non-empty value that is not a known disposition
+        then fails the typed check with a field-level message listing the valid
+        values — so the closure gate stays satisfiable only by a real disposition,
+        never by a typo the agent believes resolved a lead.
+        """
+        if value is None:
+            return None
+        token = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+        return token or None
 
     @model_validator(mode="after")
     def _check_grounding(self, info: ValidationInfo) -> Hypothesis:
@@ -686,9 +771,12 @@ __all__ = [
     "DEFERRED_HYPOTHESES_SECTION_ALIASES",
     "DISMISSAL_LINE_EXAMPLE",
     "DISMISSED_CLASSES_SECTION_ALIASES",
+    "DISPOSITION_CONVENTION",
+    "DISPOSITION_LINE_EXAMPLE",
     "HYPOTHESES_SECTION_ALIASES",
     "HYPOTHESIS_BASIS_VALUES",
     "HYPOTHESIS_CONVENTION",
+    "HYPOTHESIS_DISPOSITION_VALUES",
     "HYPOTHESIS_EXAMPLE",
     "ClassDismissal",
     "Confidence",
@@ -696,6 +784,7 @@ __all__ = [
     "FindingState",
     "Hypothesis",
     "HypothesisDeferral",
+    "HypothesisDisposition",
     "HypothesisParseError",
     "HypothesisState",
     "extract_section_body",

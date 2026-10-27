@@ -90,6 +90,14 @@ def _check_field() -> None:
     assert derrors == []
     assert [d.vuln_class for d in dismissals] == ["idor"]
 
+    # An open/blocked hypothesis can carry an inline disposition, parsed and
+    # surfaced — the field the finish-time closure gate reads.
+    disposed, disp_errors = parse_hypotheses(
+        "## Hypotheses\n- id: H1 | basis: assumed | state: blocked | disposition: deferred\n"
+    )
+    assert disp_errors == []
+    assert [h.disposition for h in disposed] == ["deferred"]
+
 
 def test_field_part_present() -> None:
     _check_field()
@@ -108,6 +116,8 @@ def _check_gate() -> None:
     assert callable(finish_tool._undisposed_open_hypotheses)
     assert callable(finish_tool._undisposed_hypotheses_across_run)
     assert "_undisposed_hypotheses_across_run" in inspect.getsource(finish_tool._do_finish)
+    # ...and it honors the inline disposition a hypothesis can carry.
+    assert "disposition" in inspect.getsource(finish_tool._undisposed_open_hypotheses)
 
 
 def test_gate_part_present() -> None:

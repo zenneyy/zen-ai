@@ -206,10 +206,11 @@ def test_unaddressed_shrinks_as_classes_are_addressed() -> None:
 # --- closure gate: no open/blocked hypothesis left undisposed --------------------
 
 
-def _model_with_hypothesis(state: str, *, deferral: bool = False) -> str:
+def _model_with_hypothesis(state: str, *, deferral: bool = False, disposition: str = "") -> str:
+    disp = f" | disposition: {disposition}" if disposition else ""
     body = (
         "# Threat Model\n\n## Hypotheses\n"
-        f"- id: H1 | basis: assumed | mechanism: x | predicted_observable: y | state: {state}\n"
+        f"- id: H1 | basis: assumed | mechanism: x | predicted_observable: y | state: {state}{disp}\n"
     )
     if deferral:
         body += (
@@ -231,6 +232,14 @@ def test_terminal_or_in_progress_states_are_not_undisposed(state: str) -> None:
 
 def test_a_deferral_disposes_an_open_hypothesis() -> None:
     assert _undisposed_open_hypotheses(_model_with_hypothesis("open", deferral=True)) == []
+
+
+@pytest.mark.parametrize("state", ["open", "blocked"])
+def test_an_inline_disposition_disposes_a_lead(state: str) -> None:
+    # The low-friction channel the live agent reaches for: a disposition written
+    # straight onto the hypothesis line satisfies the closure gate, in place of a
+    # terminal state or a separate deferral record.
+    assert _undisposed_open_hypotheses(_model_with_hypothesis(state, disposition="deferred")) == []
 
 
 def _finish() -> dict:

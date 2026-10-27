@@ -168,6 +168,11 @@ extend-exclude = [
     "build",
     "dist",
     "migrations",
+    # Intentionally-vulnerable eval target SERVICE trees are fixtures, not harness
+    # logic — insecure by design and never shipped (evals/ is outside the wheel).
+    # The harness logic, manifests, graders, runner and tests under evals/ stay
+    # fully linted.
+    "evals/targets/*/service",
 ]
 
 [tool.ruff.lint]
@@ -272,6 +277,7 @@ ignore = [
 "tests/test_threat_model_tool.py" = ["E501"]
 "tests/test_threat_model_schema.py" = ["E501"]
 "tests/test_implied_classes.py" = ["E501"]
+"tests/test_hypothesis_disposition_closure.py" = ["E501"]
 "tests/test_reasoning_regression_probe.py" = ["E501"]
 "zen/tools/**/*.py" = [
     "ARG001", # Unused function argument (tools may have unused args for interface consistency)
@@ -339,6 +345,12 @@ ignore = [
 "zen/interface/interactive.py" = ["PLC0415"]
 "zen/interface/tui/runtime.py" = ["PLC0415"]
 "zen/interface/tui/backend/controller.py" = ["PLC0415"]
+# Eval harness (evals/ is quarantined from the agent — see evals/quarantine.py).
+# The deterministic harness-logic tests carry synthetic run-artifact fixtures as
+# long literal lines and fixture tokens that resemble secrets, by design (mirrors
+# the threat-model fixture-test ignores above). Manifests carry descriptive prose.
+"evals/tests/*.py" = ["E501", "S105", "S106"]
+"evals/targets/*/manifest.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 force-single-line = false

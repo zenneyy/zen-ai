@@ -44,7 +44,12 @@ from zen.tools.agents_graph.contracts import HuntBasis, HuntTask
 from zen.tools.coverage.tools import record_coverage
 from zen.tools.finish.tool import finish_scan
 from zen.tools.threat_model.implied_classes import IMPLIED_CLASS_GATE_DESCRIPTION
-from zen.tools.threat_model.schema import DISMISSAL_LINE_EXAMPLE
+from zen.tools.threat_model.schema import (
+    DISMISSAL_LINE_EXAMPLE,
+    DISPOSITION_CONVENTION,
+    DISPOSITION_LINE_EXAMPLE,
+    HYPOTHESIS_DISPOSITION_VALUES,
+)
 from zen.tools.threat_model.tools import _REQUIRED_SECTIONS
 from zen.utils.resource_paths import get_zen_resource_path
 
@@ -123,6 +128,27 @@ def test_recon_contract_names_the_architecture_implied_completeness_gate() -> No
     assert DISMISSAL_LINE_EXAMPLE in contract
     # The teaching text is the gate's own description (single source, no drift).
     assert IMPLIED_CLASS_GATE_DESCRIPTION in contract
+
+
+def test_recon_contract_names_the_hypothesis_disposition_convention() -> None:
+    """Recon owns the threat model, so its CONTRACT teaches how an open/blocked
+    hypothesis is disposed — sourced from the same schema constants the closure
+    gate reads, so the text that teaches and the gate that enforces cannot drift."""
+    contract = render_contract("recon")
+    assert DISPOSITION_CONVENTION in contract
+    assert DISPOSITION_LINE_EXAMPLE in contract
+    for value in HYPOTHESIS_DISPOSITION_VALUES:
+        assert value in contract, value
+
+
+def test_root_contract_names_the_closure_gate_disposition() -> None:
+    """Root owns ``finish_scan``, so its CONTRACT surfaces the closure gate: finish
+    is blocked until every open/blocked hypothesis is disposed, by the exact inline
+    format the gate accepts."""
+    contract = render_contract("root")
+    assert "closure gate" in contract.lower()
+    assert DISPOSITION_CONVENTION in contract
+    assert DISPOSITION_LINE_EXAMPLE in contract
 
 
 def test_hunter_contract_surfaces_the_reports_required_fields() -> None:

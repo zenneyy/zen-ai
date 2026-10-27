@@ -24,17 +24,31 @@ _OPEN_HYPOTHESIS_STATES = frozenset({"open", "blocked"})
 def _undisposed_open_hypotheses(content: str) -> list[str]:
     """Ids of open/blocked hypotheses in one model with no recorded disposition.
 
-    A disposition is a terminal state (``confirmed``/``refuted``) — a hypothesis
-    in one of those is not open/blocked — or a recorded deferral naming the
-    hypothesis id (the explicit carry-forward). Anything left open or blocked and
-    not deferred is an undisposed lead and is returned by id.
+    A hypothesis counts as disposed when any one of these holds:
+
+    * it is in a terminal state (``confirmed``/``refuted``) — then it is not
+      open/blocked in the first place;
+    * it carries an inline ``disposition`` on its own hypothesis line — the
+      low-friction channel (``deferred`` / ``accepted_risk`` / ``out_of_scope`` /
+      ``resolved_elsewhere``, validated by :class:`~zen.tools.threat_model.schema.Hypothesis`); or
+    * a ``## Deferred Hypotheses`` record names its id — the dedicated channel.
+
+    Anything left open or blocked with none of these is an undisposed lead and is
+    returned by id. Both disposition channels are read from the same schema
+    definitions the save validates against, so the gate accepts exactly what the
+    schema lets a hypothesis express — the fix for the save/finish deadlock where
+    the gate demanded a disposition the schema forbade recording.
     """
     from zen.tools.threat_model.schema import parse_deferrals, parse_hypotheses
 
     hypotheses, _ = parse_hypotheses(content)
     deferrals, _ = parse_deferrals(content)
     deferred = {deferral.hypothesis_id for deferral in deferrals}
-    return [h.id for h in hypotheses if h.state in _OPEN_HYPOTHESIS_STATES and h.id not in deferred]
+    return [
+        h.id
+        for h in hypotheses
+        if h.state in _OPEN_HYPOTHESIS_STATES and h.disposition is None and h.id not in deferred
+    ]
 
 
 def _undisposed_hypotheses_across_run() -> list[str]:
@@ -98,7 +112,10 @@ def _do_finish(
     # to leave unrecorded.
     undisposed = _undisposed_hypotheses_across_run()
     if undisposed:
-        from zen.tools.threat_model.schema import DEFERRAL_LINE_EXAMPLE
+        from zen.tools.threat_model.schema import (
+            DEFERRAL_LINE_EXAMPLE,
+            DISPOSITION_LINE_EXAMPLE,
+        )
 
         logger.debug("finish_scan rejected — undisposed open/blocked hypotheses: %s", undisposed)
         return {
@@ -107,9 +124,10 @@ def _do_finish(
             "error": (
                 "Closure gate: the scan cannot finish while these threat-model hypotheses are "
                 f"still open or blocked with no recorded disposition: {', '.join(undisposed)}. "
-                "Resolve each to a terminal state (confirmed or refuted) in the model, or carry "
-                "it forward explicitly by recording a deferral under a 'Deferred Hypotheses' "
-                f"section (`{DEFERRAL_LINE_EXAMPLE}`). A lead is disposed of or deferred, never "
+                "Dispose of each — resolve it to a terminal state (confirmed or refuted) in the "
+                "model, record an inline disposition on its hypothesis line "
+                f"(`{DISPOSITION_LINE_EXAMPLE}`), or carry it forward under a 'Deferred "
+                f"Hypotheses' section (`{DEFERRAL_LINE_EXAMPLE}`). A lead is disposed of, never "
                 "dropped silently."
             ),
             "undisposed_hypotheses": undisposed,
@@ -277,11 +295,14 @@ async def finish_scan(
        from this tool reports coverage counts and any unresolved rows.
     6. **Hypothesis disposition (closure gate).** Every threat-model
        hypothesis still ``open`` or ``blocked`` must be disposed of
-       before finishing: resolved to a terminal state (``confirmed`` /
-       ``refuted``) in the model, or carried forward explicitly as a
-       deferral under a ``## Deferred Hypotheses`` section
+       before finishing, in any one of three ways: resolved to a
+       terminal state (``confirmed`` / ``refuted``) in the model; marked
+       with an inline ``disposition:`` field on its own hypothesis line
+       (one of ``deferred`` / ``accepted_risk`` / ``out_of_scope`` /
+       ``resolved_elsewhere``, optionally a ``disposition_reason:``); or
+       carried forward under a ``## Deferred Hypotheses`` section
        (``- hypothesis_id: <id> | reason: <why it is carried forward>``).
-       A lead you could neither confirm nor rule out is deferred, not
+       A lead you could neither confirm nor rule out is disposed of, not
        dropped — ``finish_scan`` refuses while any undisposed open or
        blocked hypothesis remains, naming it.
 
