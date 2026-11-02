@@ -225,7 +225,7 @@ ENV VIRTUAL_ENV="/app/.venv"
 
 WORKDIR /app
 
-ARG CAIDO_VERSION=0.56.0
+ARG CAIDO_VERSION=0.58.3
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "x86_64" ]; then \
         CAIDO_ARCH="x86_64"; \

@@ -146,14 +146,25 @@ async def list_requests(
 
     Caido HTTPQL syntax (operators differ by field type):
 
-    - **Integer fields** (``resp.code``, ``req.port``, ``id``,
-      ``roundtrip``) — ``eq``, ``gt``, ``gte``, ``lt``, ``lte``, ``ne``.
-      Examples: ``resp.code.eq:200``, ``resp.code.gte:400``,
-      ``req.port.eq:443``.
+    - **Integer fields** (``resp.code``, ``req.port``, ``row.id``,
+      ``resp.len``, ``resp.roundtrip``) — ``eq``, ``gt``, ``gte``, ``lt``,
+      ``lte``, ``ne``. Examples: ``resp.code.eq:200``,
+      ``resp.code.gte:400``, ``req.port.eq:443``, ``resp.len.gt:100000``.
     - **Text/byte fields** (``req.method``, ``req.host``, ``req.path``,
-      ``req.query``, ``req.ext``, ``req.raw``) — ``regex``, ``cont``
-      (substring), ``eq``. Examples: ``req.method.eq:"POST"``,
-      ``req.path.cont:"/api/"``, ``req.host.regex:".*\\.example\\.com"``.
+      ``req.query``, ``req.ext``, ``req.raw``, ``req.body``,
+      ``resp.body``, ``resp.raw``) — ``regex``, ``cont`` (substring),
+      ``eq``. Examples: ``req.method.eq:"POST"``,
+      ``req.path.cont:"/api/"``, ``req.host.regex:".*\\.example\\.com"``,
+      ``req.body.cont:"password"``.
+    - **Header fields** (``req.header`` / ``resp.header``, 0.58.0+) are a
+      sub-namespace, **not** a plain string field — filtering one like a
+      plain string field (a bare ``cont``/``eq`` directly on it) is
+      rejected as *Invalid HTTPQL query*. Match by **name**
+      (``req.header.name.eq:"Authorization"``), by **value**
+      (``req.header.value.cont:"Bearer"``), or a **specific header's
+      value** with the keyed form
+      (``req.header["Authorization"].cont:"Bearer"``,
+      ``resp.header["Set-Cookie"].cont:"HttpOnly"``).
     - **Date fields** (``req.created_at``) — ``gt``, ``lt`` with ISO
       timestamps: ``req.created_at.gt:"2024-01-01T00:00:00Z"``.
     - **Combine** with ``AND`` / ``OR``: ``req.method.eq:"POST" AND

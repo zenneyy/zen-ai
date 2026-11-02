@@ -42,7 +42,7 @@ High-signal `caido_api` helpers (full signatures introspected from the sandbox):
 - `repeat_request(request_id, modifications={...})` replays a captured request after modifying `url`, `params`, `headers`, `body`, or `cookies` — this is the programmatic match-and-replace primitive.
 - `list_sitemap(scope_id=, parent_id=, depth="DIRECT", page=1, page_size=30)` walks Caido's tree view of the discovered surface; omit `parent_id` for roots, pass an entry id with `depth="DIRECT"` or `"ALL"` to drill in.
 - `view_sitemap_entry(entry_id)` returns one sitemap entry plus its 30 most recent related requests.
-- `scope_rules(action, allowlist=, denylist=, scope_id=, scope_name=)` manages the default scope (`action` is a `ScopeAction` — `GET`/`SET`/`UPDATE`/`CLEAR`).
+- `scope_rules(action, allowlist=, denylist=, scope_id=, scope_name=)` is CRUD over named scopes (`action` is a `ScopeAction` — `list`/`get`/`create`/`update`/`delete`); reference a scope elsewhere via `scope_id=` on `list_requests`/`list_sitemap`.
 - `scope_create / scope_list / scope_get / scope_update / scope_delete(client, ...)` manage named scopes using an explicit client from `get_client()`.
 - `replay_send_raw(client, raw=..., connection=...)` sends arbitrary raw bytes down a connection (for cases `repeat_request` normalizes).
 
@@ -52,8 +52,9 @@ import asyncio
 from caido_api import list_requests, view_request, repeat_request, scope_rules
 
 async def main():
-    await scope_rules("SET", allowlist=["*.target.tld"], denylist=["*.target.tld/logout*"])
-    page = await list_requests(httpql_filter='req.host.cont:"target.tld" AND req.method.eq:"POST"', first=50)
+    scope = await scope_rules("create", scope_name="target",
+        allowlist=["*.target.tld", "target.tld"], denylist=["*.target.tld/logout*"])
+    page = await list_requests(httpql_filter='req.host.cont:"target.tld" AND req.method.eq:"POST"', first=50, scope_id=scope.id)
     for edge in page.edges:
         rid = edge.node.request.id
         body = await view_request(rid, part="request")
@@ -66,8 +67,8 @@ asyncio.run(main())
 ```
 
 Common patterns:
-- Lock scope before any crawl/fuzz:
-  `await scope_rules("SET", allowlist=["*.target.tld", "target.tld"], denylist=["*.target.tld/logout*", "*.target.tld/admin/delete*"])`
+- Create a scope, then filter queries to it:
+  `scope = await scope_rules("create", scope_name="target", allowlist=["*.target.tld", "target.tld"], denylist=["*.target.tld/logout*", "*.target.tld/admin/delete*"])` — pass `scope_id=scope.id` to `list_requests`/`list_sitemap`.
 - List recent POSTs to the API:
   `await list_requests(httpql_filter='req.method.eq:"POST" AND req.path.cont:"/api/"', first=100)`
 - Pull one request's raw bytes for payload crafting:
@@ -95,7 +96,7 @@ Critical correctness rules:
 Usage rules:
 - Prefer HTTPQL filters on `list_requests` over post-filtering in Python — the server does it faster and cheaper.
 - Keep `first` modest (50-200); walk pages explicitly for larger sets.
-- Use named scopes (`scope_create`) only when you need to switch between engagements; the default scope via `scope_rules` is enough for a single-target task.
+- Define a named scope with `scope_rules("create", ...)` (or the client-level `scope_create`), then filter with `scope_id=`; a single-target task often needs none — HTTPQL `req.host` filters are enough.
 - Use `replay_send_raw` only for cases where `repeat_request`'s structural `modifications` dict can't express the exact bytes (smuggling, raw-header spoofing).
 - Do not persist Caido-side tokens or cookies into shell history; read them from `view_request` and keep them in Python locals.
 
@@ -116,12 +117,13 @@ Every HTTP exchange from every tool flows through Caido. The methodology structu
 
 ### Phase 1 — Scope Configuration
 
-Lock scope before any traffic flows. See **Scope Management** below for glob rules, `ScopeAction` values, and named scopes.
+Create a scope up front so you can filter captured traffic to the target. See **Scope Management** below for glob rules, `ScopeAction` values, and named scopes.
 
 ```python
-await scope_rules("SET",
+scope = await scope_rules("create", scope_name="target",
     allowlist=["*.target.tld", "target.tld"],
     denylist=["*.target.tld/logout*", "*.target.tld/static/*"])
+# then pass scope_id=scope.id to list_requests / list_sitemap
 ```
 
 ### Phase 2 — Passive Collection
@@ -143,8 +145,8 @@ Key queries:
 - State-changing: `req.method.eq:"POST" OR req.method.eq:"PUT" OR req.method.eq:"DELETE"`
 - Error responses: `resp.code.gte:400`
 - Large responses: `resp.len.gt:50000`
-- Auth headers: `req.header.cont:"Authorization"`
-- JSON API: `req.header.cont:"application/json" AND req.method.eq:"POST"`
+- Auth headers: `req.header.name.eq:"Authorization"`
+- JSON API: `req.header["Content-Type"].cont:"application/json" AND req.method.eq:"POST"`
 
 ### Phase 4 — Targeted Replay
 
@@ -176,7 +178,7 @@ async def collect_evidence(request_ids, output_dir="/tmp/evidence"):
 
 ## HTTPQL Filter Grammar
 
-HTTPQL is Caido's query language for filtering captured traffic. All `list_requests(httpql_filter=...)` calls use this grammar. Field names and operators are verified against the official Caido HTTPQL reference (https://docs.caido.io/app/reference/httpql).
+HTTPQL is Caido's query language for filtering captured traffic. All `list_requests(httpql_filter=...)` calls use this grammar. Field names and operators are verified against the official Caido HTTPQL reference (https://docs.caido.io/app/reference/httpql) for the deployed Caido v0.58.3.
 
 ### Namespaces
 
@@ -185,7 +187,7 @@ HTTPQL is Caido's query language for filtering captured traffic. All `list_reque
 | `req` | All proxied HTTP requests |
 | `resp` | All proxied HTTP responses |
 | `preset` | Saved filter presets |
-| `row` | A request's numerical identifier in traffic tables |
+| `row` | A request's numerical identifier in traffic tables; the field is `row.id` |
 | `source` | The Caido feature that generated the traffic (Search interface only) |
 
 ### Request Fields (`req.`)
@@ -196,7 +198,7 @@ HTTPQL is Caido's query language for filtering captured traffic. All `list_reque
 | `req.host` | string | Host header value |
 | `req.path` | string | URL path |
 | `req.query` | string | URL query string |
-| `req.header` | string | Request headers (searches across all headers) |
+| `req.header.name` / `req.header.value` | string | Match a request header by name or by value (0.58.0+). For one specific header's value use the keyed form `req.header["Name"]`. A bare `req.header.<op>` is **rejected**. |
 | `req.body` | string | Request body (excludes headers) |
 | `req.raw` | string | Full raw request data |
 | `req.ext` | string | File extension |
@@ -210,11 +212,19 @@ HTTPQL is Caido's query language for filtering captured traffic. All `list_reque
 | Field | Type | Description |
 |-------|------|-------------|
 | `resp.code` | integer | HTTP status code |
-| `resp.header` | string | Response headers (searches across all headers) |
+| `resp.header.name` / `resp.header.value` | string | Match a response header by name or by value (0.58.0+). For one specific header's value use the keyed form `resp.header["Name"]`. A bare `resp.header.<op>` is **rejected**. |
 | `resp.body` | string | Response body (excludes headers) |
 | `resp.raw` | string | Full raw response data |
 | `resp.len` | integer | Response size in bytes |
 | `resp.roundtrip` | integer | Total request/response cycle time in milliseconds |
+
+> **Header filtering (0.58.0+).** `req.header` / `resp.header` are a sub-namespace,
+> not a plain string field — filtering one like a plain string field (a bare
+> `cont`/`eq` directly on it) is rejected as *Invalid HTTPQL query*. Match by
+> **name** (`req.header.name.eq:"Authorization"`), by **value**
+> (`req.header.value.cont:"Bearer"`), or a **specific header's value** with the
+> keyed form (`req.header["Authorization"].cont:"Bearer"`,
+> `resp.header["Set-Cookie"].cont:"HttpOnly"`).
 
 ### Operators
 
@@ -251,16 +261,16 @@ String values are quoted: `req.method.eq:"POST"`. Integer values are unquoted: `
 |---------|--------|
 | State-changing requests | `req.method.eq:"POST" OR req.method.eq:"PUT" OR req.method.eq:"DELETE"` |
 | API errors | `req.path.cont:"/api/" AND resp.code.gte:400` |
-| Auth headers | `req.header.cont:"Authorization"` |
-| Specific cookies | `req.header.cont:"Cookie:" AND req.header.cont:"session_id="` |
+| Auth headers | `req.header.name.eq:"Authorization"` |
+| Specific cookies | `req.header["Cookie"].cont:"session_id="` |
 | Large responses (data leak) | `resp.len.gt:100000` |
 | Slow responses (timing) | `resp.roundtrip.gt:5000` |
-| JSON API traffic | `req.header.cont:"application/json"` |
+| JSON API traffic | `req.header["Content-Type"].cont:"application/json"` |
 | Path pattern match | `req.path.regex:"^/api/v[0-9]+/users/[0-9]+"` |
 | Non-TLS requests | `req.tls.eq:false` |
 | ID parameters | `req.query.cont:"id="` |
 | POST API non-200 | `req.method.eq:"POST" AND req.path.cont:"/api/" AND resp.code.ne:200` |
-| File uploads | `req.header.cont:"multipart/form-data"` |
+| File uploads | `req.header["Content-Type"].cont:"multipart/form-data"` |
 | By extension | `req.ext.eq:"json" OR req.ext.eq:"xml"` |
 
 ---
@@ -269,19 +279,25 @@ String values are quoted: `req.method.eq:"POST"`. Integer values are unquoted: `
 
 Scope controls which traffic Caido tracks for analysis. Always configure scope before generating traffic.
 
-### Default Scope via `scope_rules`
+### Scope CRUD via `scope_rules`
 
-`ScopeAction` values:
-- `GET` — retrieve current scope configuration
-- `SET` — replace scope entirely with new allowlist/denylist
-- `UPDATE` — merge new entries into existing scope
-- `CLEAR` — remove all scope rules (captures everything)
+`ScopeAction` values (as implemented in `caido_api.scope_rules`):
+- `list` — return every scope (takes no other args).
+- `get` — one scope by `scope_id`.
+- `create` — new named scope; needs `scope_name`, optionally `allowlist`/`denylist`.
+- `update` — replace a scope's rules; needs `scope_id` **and** `scope_name`; `allowlist`/`denylist` replace the previous values (they do not merge).
+- `delete` — remove a scope by `scope_id`.
+
+Scopes are named entities, not a single global toggle: reference one by `scope_id=` in `list_requests`/`list_sitemap`. An empty allowlist means "allow all", so an update to empty lists is the way to clear a scope's rules.
 
 ```python
-current = await scope_rules("GET")
-await scope_rules("SET", allowlist=["*.target.tld", "target.tld"], denylist=["*.target.tld/logout*"])
-await scope_rules("UPDATE", allowlist=["*.api.partner.tld"])
-await scope_rules("CLEAR")
+scopes = await scope_rules("list")                                  # enumerate scopes
+scope = await scope_rules("create", scope_name="target",            # create one
+    allowlist=["*.target.tld", "target.tld"], denylist=["*.target.tld/logout*"])
+await scope_rules("get", scope_id=scope.id)                         # inspect its rules
+await scope_rules("update", scope_id=scope.id, scope_name="target",  # replace its rules
+    allowlist=["*.target.tld", "target.tld", "*.api.partner.tld"], denylist=[])
+await scope_rules("delete", scope_id=scope.id)                      # remove it
 ```
 
 ### Glob Pattern Rules
@@ -294,12 +310,12 @@ Scope patterns use glob syntax:
 
 Common pitfall: using only `*.target.tld` misses the apex. Always include both:
 ```python
-await scope_rules("SET", allowlist=["*.target.tld", "target.tld"])
+scope = await scope_rules("create", scope_name="target", allowlist=["*.target.tld", "target.tld"])
 ```
 
 Denylist patterns take priority over allowlist when both match:
 ```python
-await scope_rules("SET",
+scope = await scope_rules("create", scope_name="target",
     allowlist=["*.target.tld", "target.tld"],
     denylist=[
         "*.target.tld/logout*",        # never replay logout
@@ -318,7 +334,8 @@ await scope_create(client, name="engagement-alpha", allowlist=["*.alpha.tld", "a
 await scope_create(client, name="engagement-beta", allowlist=["*.beta.tld", "beta.tld"])
 scopes = await scope_list(client)                  # enumerate all named scopes
 details = await scope_get(client, scope_id="<id>") # inspect one scope's rules
-await scope_update(client, scope_id="<id>", denylist=["*.alpha.tld/admin/*"])
+await scope_update(client, scope_id="<id>", name="engagement-alpha",
+    allowlist=["*.alpha.tld", "alpha.tld"], denylist=["*.alpha.tld/admin/*"])  # update replaces rules wholesale
 await scope_delete(client, scope_id="<id>")
 ```
 
@@ -521,7 +538,7 @@ Same loop pattern as IDOR, but swap the Authorization header instead of a parame
 ```python
 async def auth_swap_test(victim_token):
     reqs = await list_requests(
-        httpql_filter='req.header.cont:"Authorization" AND req.path.cont:"/api/"', first=100)
+        httpql_filter='req.header.name.eq:"Authorization" AND req.path.cont:"/api/"', first=100)
     for edge in reqs.edges:
         result = await repeat_request(edge.node.request.id,
             modifications={"headers": {"Authorization": f"Bearer {victim_token}"}})
