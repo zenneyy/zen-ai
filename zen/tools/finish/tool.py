@@ -51,12 +51,52 @@ def _undisposed_open_hypotheses(content: str) -> list[str]:
     ]
 
 
+def _undisposed_from_ledger(ledger: object) -> list[str]:
+    """The closure gate as a query over the ledger's typed hypotheses.
+
+    For each saved document, the open/blocked hypotheses are read as typed
+    :class:`~zen.tools.threat_model.schema.Hypothesis` rows (their ``state`` and
+    inline ``disposition`` are object fields, not re-parsed prose); the dedicated
+    ``## Deferred Hypotheses`` dispositions — the other disposition channel — are
+    read from the document view the ledger projects. Behavior-equivalent to the
+    prose path: the typed rows were parsed from the same body, and the deferral
+    grammar is the same.
+    """
+    from zen.tools.threat_model.schema import parse_deferrals
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for identity in ledger.model_identities():  # type: ignore[attr-defined]
+        hypotheses = ledger.get_hypotheses(identity)  # type: ignore[attr-defined]
+        view = ledger.get_model_view(identity)  # type: ignore[attr-defined]
+        deferrals, _ = parse_deferrals(str(view.get("content", "")) if view else "")
+        deferred = {d.hypothesis_id for d in deferrals}
+        for hypothesis in hypotheses:
+            if (
+                hypothesis.state in _OPEN_HYPOTHESIS_STATES
+                and hypothesis.disposition is None
+                and hypothesis.id not in deferred
+                and hypothesis.id not in seen
+            ):
+                seen.add(hypothesis.id)
+                ordered.append(hypothesis.id)
+    return ordered
+
+
 def _undisposed_hypotheses_across_run() -> list[str]:
     """Undisposed open/blocked hypothesis ids across every threat model this run holds.
 
-    Reads the run-scoped threat-model store. With no model saved — the common
-    case — there are no hypotheses and the closure gate is a no-op pass.
+    Queries the run-scoped research ledger's typed hypotheses when one is
+    installed, and falls back to parsing the threat-model dict store otherwise.
+    With no model saved — the common case — there are no hypotheses and the
+    closure gate is a no-op pass.
     """
+    from zen.tools.ledger.runtime import get_ledger
+
+    ledger = get_ledger()
+    if ledger is not None and ledger.has_models():
+        return _undisposed_from_ledger(ledger)
+
     from zen.tools.threat_model.tools import _MODELS, _store_lock
 
     with _store_lock:

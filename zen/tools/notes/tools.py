@@ -52,6 +52,43 @@ def _generate_note_id() -> str | None:
     return None
 
 
+def _emit_note_to_ledger(note_id: str, note: dict[str, Any]) -> None:
+    """Record (or update) one note in the research ledger. Best-effort, additive."""
+    try:
+        from zen.tools.ledger.objects import Note
+        from zen.tools.ledger.runtime import get_ledger
+
+        ledger = get_ledger()
+        if ledger is None:
+            return
+        ledger.record_note(
+            Note(
+                id=note_id,
+                title=str(note.get("title", "")),
+                content=str(note.get("content", "")),
+                category=str(note.get("category", "general")),
+                tags=list(note.get("tags", []) or []),
+                agent_id=str(note.get("agent_id", "")),
+                agent_name=str(note.get("agent_name", "")),
+                created_at=str(note.get("created_at", "")),
+                updated_at=str(note.get("updated_at", "")),
+            )
+        )
+    except Exception:  # noqa: BLE001 - the ledger is additive; never break the tool
+        logger.debug("note ledger emit skipped", exc_info=True)
+
+
+def _emit_note_deletion_to_ledger(note_id: str) -> None:
+    try:
+        from zen.tools.ledger.runtime import get_ledger
+
+        ledger = get_ledger()
+        if ledger is not None:
+            ledger.delete_note(note_id)
+    except Exception:  # noqa: BLE001 - the ledger is additive; never break the tool
+        logger.debug("note deletion ledger emit skipped", exc_info=True)
+
+
 def hydrate_notes_from_disk(state_dir: Path) -> None:
     global _notes_path  # noqa: PLW0603
     _notes_path = state_dir / "notes.json"
@@ -226,6 +263,7 @@ def _create_note_impl(
             return {"success": False, "error": f"Failed to create note: {e}", "note_id": None}
         else:
             _persist()
+            _emit_note_to_ledger(note_id, note)
             return {
                 "success": True,
                 "note_id": note_id,
@@ -313,6 +351,7 @@ def _update_note_impl(
             return {"success": False, "error": f"Failed to update note: {e}"}
         else:
             _persist()
+            _emit_note_to_ledger(note_id, note)
             return {
                 "success": True,
                 "note_id": note_id,
@@ -333,6 +372,7 @@ def _delete_note_impl(note_id: str) -> dict[str, Any]:
             return {"success": False, "error": f"Failed to delete note: {e}"}
         else:
             _persist()
+            _emit_note_deletion_to_ledger(note_id)
             return {
                 "success": True,
                 "note_id": note_id,

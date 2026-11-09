@@ -516,6 +516,7 @@ async def wait_for_agents(  # noqa: PLR0911
 _ROOT_PERSONA = "coordination/root_agent"
 _RECON_PERSONA = "coordination/recon_agent"
 _HUNTER_PERSONA = "coordination/hunter_agent"
+_REVIEWER_PERSONA = "coordination/reviewer_agent"
 
 # The role a child is spawned as. ``root`` is the orchestrator (it is built
 # directly, not via create_agent, but kept here as the single source of truth);
@@ -531,8 +532,13 @@ _ROLE_PERSONA: dict[str, str] = {
     "root": _ROOT_PERSONA,
     "recon": _RECON_PERSONA,
     "hunter": _HUNTER_PERSONA,
+    # The clean-context reviewer (item 2.2): a first-class role whose CONTRACT is
+    # generated and whose METHOD is hand-written at senior-researcher depth. The
+    # deterministic validator stays non-agent code, so ``validator`` keeps no
+    # persona.
+    "reviewer": _REVIEWER_PERSONA,
 }
-_PERSONA_REQUIRED_ROLES: frozenset[str] = frozenset({"root", "recon", "hunter"})
+_PERSONA_REQUIRED_ROLES: frozenset[str] = frozenset({"root", "recon", "hunter", "reviewer"})
 
 
 class PersonaResolutionError(RuntimeError):
@@ -569,8 +575,8 @@ def _role_persona_for(
     directly to its persona module (trigger ``"role:<role>"``). Only
     ``generic`` — the default, i.e. a legacy caller that passed no role — falls
     back to the old name/skill heuristic, and when that weak path fires it logs
-    a WARNING naming the agent so the guess is visible. ``validator`` /
-    ``reviewer`` have no persona yet and resolve to ``(None, None)``.
+    a WARNING naming the agent so the guess is visible. ``validator`` has no
+    persona (it is deterministic, non-agent code) and resolves to ``(None, None)``.
 
     ``role`` is keyword-only with a ``generic`` default so legacy positional
     callers (``_role_persona_for(name, skills)``) keep working unchanged.
@@ -581,7 +587,7 @@ def _role_persona_for(
     if persona is not None:
         return persona, f"role:{role}"
     if role != "generic":
-        # validator / reviewer: a known role with no persona yet. No guessing.
+        # validator: a known role with no persona (deterministic code). No guessing.
         return None, None
     legacy_persona, legacy_trigger = _legacy_name_skill_persona(name, skills)
     if legacy_persona is not None:

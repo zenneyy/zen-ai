@@ -28,6 +28,7 @@ from agents import RunContextWrapper, function_tool
 from pydantic import BaseModel, Field
 
 from zen.skills import _candidate_skill_files
+from zen.tools.ledger.runtime import get_ledger
 from zen.tools.threat_model.tools import _resolve_target, _target_identity
 
 
@@ -384,6 +385,8 @@ def _register_architecture_impl(
         _DETECTED_ARCHITECTURE[identity] = cleaned
         _persist_architecture_locked()
 
+    _emit_architecture_to_ledger(identity, cleaned)
+
     logger.info(
         "register_architecture: target=%s depth=%d hops=%s",
         identity,
@@ -397,6 +400,22 @@ def _register_architecture_impl(
         "depth": len(cleaned),
         "hops": cleaned,
     }
+
+
+def _emit_architecture_to_ledger(identity: str, hops: list[dict[str, str]]) -> None:
+    """Record the request path into the research ledger as typed SurfaceNodes.
+
+    Best-effort and additive: the dict store above remains the live read-model,
+    and a ledger that is absent (unit tests) or unhappy must never fail the tool.
+    In a real run the ledger is the authoritative, resumable record the gates
+    query; here the tool simply emits the event that keeps it current.
+    """
+    try:
+        ledger = get_ledger()
+        if ledger is not None:
+            ledger.record_architecture(identity, hops)
+    except Exception:  # noqa: BLE001 - the ledger is additive; never break the tool
+        logger.debug("architecture ledger emit skipped", exc_info=True)
 
 
 def read_architecture(

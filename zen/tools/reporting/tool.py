@@ -954,6 +954,14 @@ async def _do_create(
             cvss_score,
             title,
         )
+        _emit_finding_to_ledger(
+            report_id=report_id,
+            title=title,
+            endpoint=endpoint,
+            method=method,
+            http_exchange_ids=http_exchange_ids,
+            agent_id=agent_id,
+        )
         return {
             "success": True,
             "message": f"Vulnerability report '{title}' created successfully",
@@ -976,6 +984,63 @@ def _caller_identity(ctx: RunContextWrapper) -> tuple[str | None, str | None]:
             raw_agent_name = names.get(agent_id)
             agent_name = raw_agent_name if isinstance(raw_agent_name, str) else None
     return agent_id, agent_name
+
+
+def _emit_finding_to_ledger(
+    *,
+    report_id: str,
+    title: str,
+    endpoint: str | None,
+    method: str | None,
+    http_exchange_ids: list[str] | None,
+    agent_id: str | None,
+) -> None:
+    """Record a filed report as a typed, provenance-bearing candidate finding.
+
+    A filed vulnerability report is a *candidate* in the ledger's terms: it
+    enters as a :class:`~zen.tools.ledger.objects.Finding` in state ``open`` with
+    re-executable :class:`~zen.tools.ledger.objects.Evidence` for its captured
+    HTTP exchanges. It is **not** confirmed here — a finding reaches ``confirmed``
+    only through section 2.2's validator verdict — so this is the socket that
+    makes a confirmation, when it comes, rest on recorded, replayable evidence
+    rather than a quoted string. Additive and best-effort: a ledger that is
+    absent or unhappy never affects filing the report.
+    """
+    try:
+        from zen.tools.ledger.objects import Evidence, EvidenceReplay, Finding
+        from zen.tools.ledger.runtime import get_ledger
+
+        ledger = get_ledger()
+        if ledger is None:
+            return
+        evidence_ids: list[str] = []
+        if http_exchange_ids:
+            inputs = {}
+            if endpoint:
+                inputs["url"] = endpoint
+            if method:
+                inputs["method"] = method
+            evidence = Evidence(
+                id=f"ev-{report_id}",
+                kind="proxy_exchange",
+                evidence_refs=list(http_exchange_ids),
+                agent_id=str(agent_id or ""),
+                replay=EvidenceReplay(medium="http", inputs=inputs),
+                summary=f"Captured HTTP exchange(s) proving: {title}",
+            )
+            ledger.record_evidence(evidence)
+            evidence_ids.append(evidence.id)
+        ledger.record_finding(
+            Finding(
+                id=report_id,
+                title=title,
+                state="open",
+                evidence_ids=evidence_ids,
+            ),
+            agent_id=str(agent_id or ""),
+        )
+    except Exception:  # noqa: BLE001 - the ledger is additive; never break filing
+        logger.debug("finding ledger emit skipped", exc_info=True)
 
 
 @function_tool(timeout=180, strict_mode=False)

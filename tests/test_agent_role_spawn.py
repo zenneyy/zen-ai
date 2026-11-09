@@ -22,6 +22,7 @@ from zen.tools.agents_graph import tools as agent_tools
 from zen.tools.agents_graph.tools import (
     _HUNTER_PERSONA,
     _RECON_PERSONA,
+    _REVIEWER_PERSONA,
     PersonaResolutionError,
     _resolve_effective_skills,
     _role_persona_for,
@@ -71,9 +72,18 @@ def test_role_map_resolves_directly_ignoring_name_and_skills() -> None:
     assert _role_persona_for("", ["xss"], role="recon") == (_RECON_PERSONA, "role:recon")
 
 
-def test_roles_without_a_persona_yet_resolve_to_none() -> None:
+def test_validator_role_has_no_persona() -> None:
+    """The deterministic validator is non-agent code, so it carries no persona."""
     assert _role_persona_for("Scanner", ["xss"], role="validator") == (None, None)
-    assert _role_persona_for("Scanner", ["xss"], role="reviewer") == (None, None)
+
+
+def test_reviewer_role_resolves_to_its_persona() -> None:
+    """Item 2.2 fills the reviewer seam: the clean-context reviewer is a real role
+    with a persona, resolved directly from the role (not name/skills)."""
+    assert _role_persona_for("Scanner", ["xss"], role="reviewer") == (
+        _REVIEWER_PERSONA,
+        "role:reviewer",
+    )
 
 
 @pytest.mark.asyncio

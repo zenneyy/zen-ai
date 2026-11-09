@@ -101,3 +101,10 @@ schema.graphql
 /.benchmarks/
 /references/
 /zen_runs_main/
+
+# Local-only: eval harness, matched-pair targets, Caido tests/harness, review doc (not for remote)
+evals/
+tests/caido_harness/
+tests/test_caido_doc_consistency.py
+tests/test_proxy_httpql_passthrough_repro.py
+docs/phase2_consolidation_review.md

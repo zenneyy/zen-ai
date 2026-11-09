@@ -32,6 +32,7 @@ from zen.tools.agents_graph.contracts import HuntReport, HuntTask, ImpactRung
 from zen.tools.agents_graph.tools import AgentRole, agent_finish, create_agent
 from zen.tools.coverage.tools import list_coverage, record_coverage
 from zen.tools.finish.tool import finish_scan
+from zen.tools.ledger.objects import ValidatorVerdict
 from zen.tools.reporting.tool import create_vulnerability_report
 from zen.tools.threat_model.implied_classes import IMPLIED_CLASS_GATE_DESCRIPTION
 from zen.tools.threat_model.schema import (
@@ -92,6 +93,14 @@ ROLE_TOOLS: dict[str, list[str]] = {
         "get_threat_model",
         "agent_finish",
     ],
+    # The clean-context reviewer (2.2) owns the verdicts it authors: it reads the
+    # shared model, records the coverage of what it re-observed, and hands back a
+    # typed result. It does not file findings — it confirms or rejects them.
+    "reviewer": [
+        "get_threat_model",
+        "record_coverage",
+        "agent_finish",
+    ],
 }
 
 # A one-line statement of what each role's outputs are, rendered under "Artifacts
@@ -108,6 +117,10 @@ _ROLE_ARTIFACTS: dict[str, str] = {
     "hunter": (
         "the vulnerability reports you file, the coverage entries for the approaches you "
         "try, and the typed hunt report you hand back."
+    ),
+    "reviewer": (
+        "the verdicts you author — each confirming or rejecting a candidate finding on behavior "
+        "you re-observed yourself, from a clean context, never on the hunter's narrative."
     ),
 }
 
@@ -349,10 +362,61 @@ def _root_requirements() -> list[ContractRequirement]:
     ]
 
 
+_REVIEWER_VERDICT_FIELDS: tuple[str, ...] = (
+    "passed",
+    "reach_only",
+    "author",
+    "oracle_signal",
+    "replayed_evidence_ids",
+)
+
+
+def _reviewer_requirements() -> list[ContractRequirement]:
+    verdict_fields = ", ".join(
+        name for name in ValidatorVerdict.model_fields if name in _REVIEWER_VERDICT_FIELDS
+    )
+    return [
+        _tool_requirement("get_threat_model", declared=("target",)),
+        _tool_requirement("record_coverage", declared=_RECORD_COVERAGE_FIELDS),
+        _tool_requirement("agent_finish", declared=("result_summary",)),
+        ContractRequirement(
+            key="clean context",
+            group="gates",
+            text=(
+                "You review from a clean context: you are handed the re-executable evidence and "
+                "the target, never the hunter's narrative, hypothesis, or reasoning. Ground every "
+                "verdict in behavior you re-observe yourself, so it cannot rest on the story you "
+                "were told."
+            ),
+        ),
+        ContractRequirement(
+            key="reach_only",
+            group="gates",
+            text=(
+                "Confirmation is re-observation, not belief: a candidate is confirmed only when "
+                "you re-execute its evidence and observe the role-/tenant-/state-differential "
+                "effect first-hand. Reaching the surface again is not enough — a re-reach with no "
+                "re-observed effect is `reach_only`, which does not confirm."
+            ),
+        ),
+        ContractRequirement(
+            key="verdict is attributable",
+            group="gates",
+            text=(
+                "Your verdict is attributable and explicit: it records "
+                f"{verdict_fields} — who authored it, whether it only reached the surface, and the "
+                "re-observed signal that grounds a confirmation. A confirmation carries that "
+                "signal; a rejection says what it re-observed instead."
+            ),
+        ),
+    ]
+
+
 _ROLE_REQUIREMENTS = {
     "recon": _recon_requirements,
     "hunter": _hunter_requirements,
     "root": _root_requirements,
+    "reviewer": _reviewer_requirements,
 }
 
 

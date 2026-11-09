@@ -27,6 +27,9 @@ from typing import Any
 
 from agents import RunContextWrapper, function_tool
 
+from zen.tools.ledger.objects import CoverageCell
+from zen.tools.ledger.runtime import get_ledger
+
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,33 @@ def _persist_locked() -> None:
         tmp_path.replace(path)
     except Exception:
         logger.exception("coverage persist to %s failed", path)
+
+
+def _emit_coverage_to_ledger(entry_id: str, entry: dict[str, Any]) -> None:
+    """Record (or update) one coverage cell in the research ledger.
+
+    Additive and best-effort: the dict store remains the live read-model and the
+    client-facing ``coverage.json`` mirror; a ledger that is absent or unhappy
+    must never fail the coverage tool.
+    """
+    try:
+        ledger = get_ledger()
+        if ledger is None:
+            return
+        cell = CoverageCell(
+            id=entry_id,
+            surface=str(entry.get("surface", "")),
+            risk_area=str(entry.get("risk_area", "")),
+            outcome=str(entry.get("outcome", "")),
+            evidence=str(entry.get("evidence", "")),
+            approaches_tried=list(entry.get("approaches_tried", []) or []),
+            agent_id=str(entry.get("agent_id", "")),
+            agent_name=str(entry.get("agent_name", "")),
+            created_at=str(entry.get("created_at", "")),
+        )
+        ledger.record_coverage_cell(cell)
+    except Exception:  # noqa: BLE001 - the ledger is additive; never break the tool
+        logger.debug("coverage ledger emit skipped", exc_info=True)
 
 
 def get_coverage_entries() -> list[dict[str, Any]]:
@@ -262,6 +292,7 @@ def _record_impl(
             return {"success": False, "error": "Could not allocate a coverage entry id"}
         _coverage_storage[entry_id] = entry
         _persist_locked()
+    _emit_coverage_to_ledger(entry_id, entry)
     logger.info(
         "Coverage recorded: id=%s outcome=%s surface=%s",
         entry_id,
@@ -333,6 +364,7 @@ def _update_impl(
         if agent_name:
             existing["agent_name"] = agent_name
         _persist_locked()
+    _emit_coverage_to_ledger(key, existing)
     logger.info(
         "Coverage updated: id=%s %s -> %s surface=%s",
         key,

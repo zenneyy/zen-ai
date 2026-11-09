@@ -49,6 +49,8 @@ from zen.tools.threat_model.schema import (
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from zen.tools.ledger.store import ResearchLedger
+
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +316,66 @@ def _persist_locked() -> None:
         logger.exception("threat model mirror to %s failed", path)
 
 
+def _ledger() -> ResearchLedger | None:
+    """The run-scoped research ledger, or ``None`` when none is installed.
+
+    Lazy import so the threat-model tool does not hard-depend on the ledger; a
+    scan without one (a unit test exercising this tool in isolation) falls back
+    to the dict store on every path below.
+    """
+    try:
+        from zen.tools.ledger.runtime import get_ledger
+
+        return get_ledger()
+    except Exception:  # noqa: BLE001 - the ledger is additive
+        return None
+
+
+def _emit_model_to_ledger(
+    identity: str,
+    content: str,
+    agent_name: str | None,
+    written_at: str,
+    hypotheses: list[Any],
+) -> None:
+    """Append the saved document to the ledger as a ``model_saved`` event.
+
+    Best-effort: the dict store is the fallback read-model, so a ledger that is
+    absent or unhappy must never fail an otherwise-accepted save.
+    """
+    ledger = _ledger()
+    if ledger is None:
+        return
+    try:
+        ledger.record_model(
+            identity,
+            content=content,
+            written_by=agent_name,
+            written_at=written_at,
+            hypotheses=hypotheses,
+            agent_id=agent_name or "",
+        )
+    except Exception:  # noqa: BLE001 - never break the save on a ledger hiccup
+        logger.debug("threat-model ledger emit skipped", exc_info=True)
+
+
+def _emit_amendment_to_ledger(identity: str, amendment: dict[str, Any]) -> None:
+    """Append an amendment to the ledger as an ``amendment_appended`` event."""
+    ledger = _ledger()
+    if ledger is None:
+        return
+    try:
+        ledger.record_amendment(
+            identity,
+            by=amendment.get("by"),
+            at=amendment.get("at", ""),
+            content=amendment.get("content", ""),
+            agent_id=str(amendment.get("by") or ""),
+        )
+    except Exception:  # noqa: BLE001 - never break the amend on a ledger hiccup
+        logger.debug("amendment ledger emit skipped", exc_info=True)
+
+
 def _missing_sections(content: str) -> list[str]:
     lowered = content.lower()
     return [
@@ -345,18 +407,40 @@ def _not_found(identity: str) -> dict[str, Any]:
     }
 
 
+def _render_model_view(identity: str) -> tuple[str | None, list[dict[str, Any]]]:
+    """Render a target's document view, preferring the ledger over the dict store.
+
+    This is the step that makes ``get_threat_model`` a *view over the ledger*:
+    when a run-scoped ledger holds the document, its projection (the saved body
+    folded with every amendment event) is authoritative. With no ledger — a unit
+    test, or a save whose ledger emit was skipped — the dict read-model is the
+    fallback, so behavior is unchanged. Both carry the same ``{content,
+    amendments}`` shape, so the rendered response is identical either way.
+    """
+    ledger = _ledger()
+    if ledger is not None:
+        try:
+            view = ledger.get_model_view(identity)
+        except Exception:  # noqa: BLE001 - fall back to the dict read-model
+            view = None
+        if view is not None:
+            return str(view.get("content") or ""), list(view.get("amendments", []))
+    with _store_lock:
+        model = _MODELS.get(identity)
+        if model is None:
+            return None, []
+        content = model.get("content")
+        amendments = list(_amendments_of(model))
+    return (content if isinstance(content, str) else None), amendments
+
+
 def _get_impl(target: str, scan_targets: list[str] | None = None) -> dict[str, Any]:
     resolved, error = _resolve_target(target, scan_targets)
     if resolved is None:
         return {"success": False, "error": error}
 
     identity = _target_identity(resolved)
-    with _store_lock:
-        model = _MODELS.get(identity)
-        if model is None:
-            return _not_found(identity)
-        content = model.get("content")
-        amendments = list(_amendments_of(model))
+    content, amendments = _render_model_view(identity)
     if not isinstance(content, str) or not content.strip():
         return _not_found(identity)
 
@@ -414,8 +498,50 @@ def _is_infrastructure_hop(hop: dict[str, str]) -> bool:
     return any(term in combined for term in _INFRASTRUCTURE_KEYWORDS)
 
 
+def _indirect_services_from_ledger(ledger: ResearchLedger) -> list[str]:
+    """The indirect-service gate as a query over typed :class:`SurfaceNode`s.
+
+    Reads each surface's ``reachability`` — the typed field the projection
+    computed with the same primary-application walk — to pick candidates
+    (``reached_through_component``), then re-applies the enumerable-backend
+    predicate (so intervening infrastructure is excluded) and the live
+    command-log discovery check. Behavior-equivalent to the prose walk below:
+    the reachability field encodes exactly the "after the primary application"
+    cut that the walk made, so the same services are flagged.
+    """
+    from collections import defaultdict
+
+    from zen.tools.command_log.tools import has_discovery_command
+
+    by_identity: dict[str, list[Any]] = defaultdict(list)
+    for node in ledger.get_surface_nodes():
+        by_identity[node.source_identity].append(node)
+
+    missing: list[str] = []
+    for nodes in by_identity.values():
+        for node in sorted(nodes, key=lambda n: n.order_index):
+            if node.reachability != "reached_through_component":
+                continue
+            if not _is_enumerable_backend(node.as_hop()):
+                continue
+            name = (node.name or "").strip()
+            if name and not has_discovery_command(name):
+                missing.append(name)
+    return missing
+
+
 def _unenumerated_indirect_services() -> list[str]:
-    """Return names of indirectly-reached services with no discovery pass logged."""
+    """Return names of indirectly-reached services with no discovery pass logged.
+
+    Prefers the object-backed query over the ledger's typed surfaces; falls back
+    to the architecture dict store when no ledger holds surfaces (a unit test, or
+    a run before the first architecture event), so the gate is behavior-equivalent
+    whichever substrate backs it.
+    """
+    ledger = _ledger()
+    if ledger is not None and ledger.has_surfaces():
+        return _indirect_services_from_ledger(ledger)
+
     from zen.tools.command_log.tools import has_discovery_command
     from zen.tools.detected_stack.tools import (
         _DETECTED_ARCHITECTURE,
@@ -475,7 +601,21 @@ def unaddressed_implied_classes(
 
 
 def _live_architecture() -> dict[str, list[dict[str, str]]]:
-    """Snapshot the detected-architecture store under its lock."""
+    """Snapshot the architecture the completeness gate reasons over.
+
+    Prefers the ledger's typed surfaces (reconstructed to the ``{name, role}``
+    hop shape the implied-classes mapping consumes, so the result is identical),
+    and falls back to the detected-architecture dict store when no ledger holds
+    surfaces. Either way the mapping sees the same hops, so the gate's result is
+    behavior-equivalent.
+    """
+    ledger = _ledger()
+    if ledger is not None and ledger.has_surfaces():
+        try:
+            return ledger.architecture_mapping()
+        except Exception:  # noqa: BLE001 - fall back to the dict store
+            logger.debug("ledger architecture_mapping failed; using dict store", exc_info=True)
+
     from zen.tools.detected_stack import tools as stack_tools
 
     with stack_tools._store_lock:
@@ -631,6 +771,7 @@ def _save_impl(  # noqa: PLR0911
         }
 
     identity = _target_identity(resolved)
+    written_at = datetime.now(UTC).isoformat()
     with _store_lock:
         existing = _MODELS.get(identity)
         outstanding = _amendments_of(existing) if existing else []
@@ -648,11 +789,17 @@ def _save_impl(  # noqa: PLR0911
                 }
         _MODELS[identity] = {
             "target": identity,
-            "written_at": datetime.now(UTC).isoformat(),
+            "written_at": written_at,
             "written_by": agent_name,
             "content": stored_body,
         }
         _persist_locked()
+
+    # Record the saved document into the research ledger as an event, with the
+    # parsed hypotheses as typed rows (the closure/implied-class gates query
+    # these objects instead of re-parsing the prose). Additive and best-effort:
+    # the dict store above stays the fallback read-model.
+    _emit_model_to_ledger(identity, stored_body, agent_name, written_at, _hypotheses)
 
     folded = len(outstanding)
     message = (
@@ -724,16 +871,16 @@ def _amend_impl(
         }
 
     identity = _target_identity(resolved)
-    amendments, amend_error = _append_amendment(
-        identity,
-        {
-            "at": datetime.now(UTC).isoformat(),
-            "by": agent_name,
-            "content": body,
-        },
-    )
+    amendment = {
+        "at": datetime.now(UTC).isoformat(),
+        "by": agent_name,
+        "content": body,
+    }
+    amendments, amend_error = _append_amendment(identity, amendment)
     if amendments is None or amend_error:
         return {"success": False, "error": amend_error}
+
+    _emit_amendment_to_ledger(identity, amendment)
 
     return {
         "success": True,

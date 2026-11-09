@@ -266,6 +266,7 @@ async def run_zen_scan(
         hydrate_architecture_from_disk,
         hydrate_detected_stack_from_disk,
     )
+    from zen.tools.ledger.runtime import hydrate_ledger
     from zen.tools.notes.tools import hydrate_notes_from_disk
     from zen.tools.threat_model.tools import hydrate_threat_models_from_disk
     from zen.tools.todo.tools import hydrate_todos_from_disk
@@ -277,6 +278,10 @@ async def run_zen_scan(
     hydrate_detected_stack_from_disk(state_dir)
     hydrate_architecture_from_disk(state_dir)
     hydrate_command_log_from_disk(state_dir)
+    # The event-sourced research ledger (2.1): the authoritative, resumable typed
+    # store the gates query and section 2.2's verdicts plug into. Replays its
+    # event log from the run's state dir, so a resumed scan reconstructs state.
+    hydrate_ledger(state_dir)
 
     root_id: str | None = None
     if is_resume:

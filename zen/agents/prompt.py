@@ -30,6 +30,7 @@ _PERSONA_VAR_BY_ROLE = {
     "root": "root_agent",
     "recon": "recon_agent",
     "hunter": "hunter_agent",
+    "reviewer": "reviewer_agent",
 }
 
 
@@ -46,6 +47,8 @@ def _role_for_contract(*, is_root: bool, skill_content: dict[str, str]) -> str |
         return "recon"
     if _PERSONA_VAR_BY_ROLE["hunter"] in skill_content:
         return "hunter"
+    if _PERSONA_VAR_BY_ROLE["reviewer"] in skill_content:
+        return "reviewer"
     return None
 
 

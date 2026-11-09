@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 import pytest
+
+from zen.tools.ledger.runtime import set_ledger
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 # Ambient configuration surface the settings models read from the environment.
@@ -64,3 +71,22 @@ def _plain_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TERM", "dumb")
     for name in ("COLORTERM", "FORCE_COLOR", "NO_COLOR", "TTY_COMPATIBLE"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_research_ledger() -> Iterator[None]:
+    """Detach the run-scoped research ledger (2.1) around every test.
+
+    The ledger is a process-global installed per run. A test that drives the
+    runner installs one; a test that exercises a tool in isolation installs none
+    and must see the dict-backed fallback paths. Detaching before and after each
+    test keeps a ledger from one test leaking into the gates of the next — the
+    tool/gate code treats "no ledger" as "use the dict store", so an isolated
+    tool test is unaffected, and a test that wants the object-backed path
+    installs its own ledger after this fixture has cleared the slate.
+    """
+    set_ledger(None)
+    try:
+        yield
+    finally:
+        set_ledger(None)
