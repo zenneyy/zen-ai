@@ -29,6 +29,12 @@ from zen.validation.quarantine import (
     VALIDATOR_NO_READ,
     quarantined_paths,
 )
+from zen.validation.replay import (
+    HttpReplayer,
+    ReplayRequest,
+    ReplayResponse,
+    ReplayTransport,
+)
 from zen.validation.reviewer import (
     CleanContextReviewer,
     DifferentialProbe,
@@ -56,8 +62,12 @@ __all__ = [
     "VALIDATOR_NO_READ",
     "CleanContextReviewer",
     "DifferentialProbe",
+    "HttpReplayer",
     "OracleExpectation",
     "PrincipalReplayer",
+    "ReplayRequest",
+    "ReplayResponse",
+    "ReplayTransport",
     "Replayer",
     "ReviewInput",
     "ValidatorLibrary",
