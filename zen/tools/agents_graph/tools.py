@@ -517,13 +517,27 @@ _ROOT_PERSONA = "coordination/root_agent"
 _RECON_PERSONA = "coordination/recon_agent"
 _HUNTER_PERSONA = "coordination/hunter_agent"
 _REVIEWER_PERSONA = "coordination/reviewer_agent"
+_CHAINING_PERSONA = "coordination/chaining_agent"
+_BYPASSING_PERSONA = "coordination/bypassing_agent"
 
 # The role a child is spawned as. ``root`` is the orchestrator (it is built
 # directly, not via create_agent, but kept here as the single source of truth);
-# ``recon`` and ``hunter`` are the two personas that ship today; ``validator``,
-# ``reviewer`` and ``generic`` have no persona yet — theirs arrive in later
-# sections — and ``generic`` is the default for an unlabelled child.
-AgentRole = Literal["root", "recon", "hunter", "validator", "reviewer", "generic"]
+# ``recon`` and ``hunter`` map the surface and prosecute one class each;
+# ``reviewer`` confirms a candidate from a clean context (item 2.2); ``chaining``
+# and ``bypassing`` are the section-2.3 single-long-lived-context composer roles
+# (composing confirmed primitives toward an impact, and defeating a control that
+# blocks one). ``validator`` is deterministic non-agent code with no persona, and
+# ``generic`` is the default for an unlabelled child.
+AgentRole = Literal[
+    "root",
+    "recon",
+    "hunter",
+    "validator",
+    "reviewer",
+    "chaining",
+    "bypassing",
+    "generic",
+]
 
 # The single source of truth: role → persona module, and which roles REQUIRE a
 # persona. A persona-requiring role that resolves to no persona is a spawn-
@@ -537,8 +551,15 @@ _ROLE_PERSONA: dict[str, str] = {
     # deterministic validator stays non-agent code, so ``validator`` keeps no
     # persona.
     "reviewer": _REVIEWER_PERSONA,
+    # The section-2.3 composer roles: each runs in ONE long-lived context (not
+    # fragmented into per-hop agents) and carries a generated CONTRACT + a
+    # hand-written METHOD-only persona, exactly as the roles above.
+    "chaining": _CHAINING_PERSONA,
+    "bypassing": _BYPASSING_PERSONA,
 }
-_PERSONA_REQUIRED_ROLES: frozenset[str] = frozenset({"root", "recon", "hunter", "reviewer"})
+_PERSONA_REQUIRED_ROLES: frozenset[str] = frozenset(
+    {"root", "recon", "hunter", "reviewer", "chaining", "bypassing"}
+)
 
 
 class PersonaResolutionError(RuntimeError):
@@ -745,8 +766,14 @@ async def create_agent(  # noqa: PLR0911
             ``role``.
         role: The child's role: ``recon`` (surface mapping), ``hunter``
             (prosecute one vulnerability class against one surface),
-            ``validator`` / ``reviewer`` / ``generic``. Drives the role
-            persona. Default ``generic``.
+            ``reviewer`` (confirm a candidate from a clean context),
+            ``chaining`` (compose confirmed primitives toward an impact
+            objective, in one long-lived context), ``bypassing`` (characterize
+            and defeat a control blocking a primitive, in one long-lived
+            context), ``validator`` / ``generic``. Drives the role persona.
+            The ``chaining`` and ``bypassing`` composer roles run as a single
+            long-lived agent — do NOT fan them out into per-hop children.
+            Default ``generic``.
         hunt_task: For a ``hunter`` only — a JSON object serializing the
             typed hunt contract (objective, the single ``vuln_class`` to
             prosecute, ``surface_refs``, hypothesis basis, depth tier,

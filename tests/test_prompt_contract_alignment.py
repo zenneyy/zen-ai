@@ -54,12 +54,23 @@ from zen.tools.threat_model.tools import _REQUIRED_SECTIONS
 from zen.utils.resource_paths import get_zen_resource_path
 
 
-ROLES = ("root", "recon", "hunter")
-_PERSONA_VAR = {"root": "root_agent", "recon": "recon_agent", "hunter": "hunter_agent"}
+# The section-2.3 composer roles (chaining, bypassing) join the Phase-1 roles in
+# the alignment coverage: each carries a generated CONTRACT and a METHOD-only
+# persona, and the same drift guards apply to them.
+ROLES = ("root", "recon", "hunter", "chaining", "bypassing")
+_PERSONA_VAR = {
+    "root": "root_agent",
+    "recon": "recon_agent",
+    "hunter": "hunter_agent",
+    "chaining": "chaining_agent",
+    "bypassing": "bypassing_agent",
+}
 _METHOD_MARKER = {
     "root": "Root Agent — Method",
     "recon": "Recon Agent — Method",
     "hunter": "Hunter Agent — Method",
+    "chaining": "Chaining Agent — Method",
+    "bypassing": "Bypassing Agent — Method",
 }
 
 _SLUG_RE = re.compile(r"`([a-z_]+)/([a-z0-9_]+)`")

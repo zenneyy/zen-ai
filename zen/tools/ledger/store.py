@@ -41,6 +41,7 @@ from pydantic import BaseModel
 
 from zen.tools.ledger.events import (
     AMENDMENT_APPENDED,
+    CHAIN_RECORDED,
     COVERAGE_RECORDED,
     EVIDENCE_RECORDED,
     FINDING_CONFIRMED,
@@ -49,6 +50,7 @@ from zen.tools.ledger.events import (
     MODEL_SAVED,
     NOTE_DELETED,
     NOTE_RECORDED,
+    OBJECT_CHAIN,
     OBJECT_COVERAGE,
     OBJECT_EVIDENCE,
     OBJECT_FINDING,
@@ -62,6 +64,7 @@ from zen.tools.ledger.events import (
     LedgerEvent,
 )
 from zen.tools.ledger.objects import (
+    ChainPlan,
     CoverageCell,
     Evidence,
     Finding,
@@ -709,6 +712,53 @@ class ResearchLedger:
                 "the validator or reviewer that authored it."
             )
             raise VerdictError(msg)
+
+    # ── chains (the 2.3 composition record) ──────────────────────────────────
+
+    def record_chain(
+        self,
+        chain: ChainPlan,
+        *,
+        enforce_decomposition: bool = True,
+        expected_version: int | None = None,
+        agent_id: str = "",
+    ) -> ChainPlan:
+        """Record a chain composition, enforcing the per-hop decomposition gate.
+
+        The structural guard is the section-2.3 forcing function, applied at the
+        store boundary exactly as :meth:`record_finding` applies the dangling-
+        evidence guard: a plan that collapses distinct-class hops into one framing,
+        or omits the terminal hop's own distinct candidate primitive, is refused
+        with :class:`~zen.tools.hunt_topology.chains.ChainDecompositionError` —
+        *before* it is recorded, so an incomplete decomposition never becomes
+        composition. The per-hop *confirmation* status is not stored here; it is
+        read back from each hop's finding by the advancement check, so there is one
+        notion of "confirmed".
+        """
+        if enforce_decomposition:
+            from zen.tools.hunt_topology.chains import assert_decomposition_complete
+
+            assert_decomposition_complete(chain)
+        self.append_event(
+            kind=CHAIN_RECORDED,
+            object_type=OBJECT_CHAIN,
+            object_id=chain.id,
+            payload=chain.model_dump(),
+            expected_version=expected_version,
+            agent_id=agent_id or chain.author,
+        )
+        return chain
+
+    def get_chain(self, chain_id: str) -> ChainPlan | None:
+        with self._lock:
+            entry = self._proj.get(OBJECT_CHAIN, {}).get(chain_id)
+        return _rebuild(ChainPlan, entry["state"]) if entry else None
+
+    def list_chains(self) -> list[ChainPlan]:
+        return [
+            _rebuild(ChainPlan, entry["state"])
+            for entry in self._proj.get(OBJECT_CHAIN, {}).values()
+        ]
 
     # ── bounded views (counter context rot) ──────────────────────────────────
 

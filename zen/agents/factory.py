@@ -31,6 +31,7 @@ from zen.tools.agents_graph.tools import (
 from zen.tools.coverage.tools import list_coverage, record_coverage, update_coverage
 from zen.tools.detected_stack.tools import register_architecture, register_detected_stack
 from zen.tools.finish.tool import finish_scan
+from zen.tools.hunt_topology.tools import record_chain_plan
 from zen.tools.load_skill.tool import load_skill
 from zen.tools.mcp import (
     call_mcp,
@@ -621,6 +622,7 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     wait_for_agents,
     create_agent,
     stop_agent,
+    record_chain_plan,
 )
 
 

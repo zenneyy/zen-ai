@@ -48,17 +48,26 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Reused verbatim so there is exactly one definition of each. The impact ladder
+# and the disposition vocabulary are defined once elsewhere and imported here so
+# the chain record speaks the same ``reach → … → chained`` and
+# ``deferred/accepted_risk/…`` language the rest of the engine already enforces.
+from zen.tools.agents_graph.contracts import ImpactRung
+
 # Reused verbatim so there is exactly one definition of each. These are the two
 # record kinds 1.3 already validated; the ledger stores them unchanged.
-from zen.tools.threat_model.schema import Finding, Hypothesis
+from zen.tools.threat_model.schema import Finding, Hypothesis, HypothesisDisposition
 
 
 __all__ = [
+    "ChainHop",
+    "ChainPlan",
     "CoverageCell",
     "Evidence",
     "EvidenceReplay",
     "Finding",
     "Hypothesis",
+    "ImpactRung",
     "Note",
     "Reachability",
     "SurfaceNode",
@@ -433,3 +442,146 @@ class ValidatorVerdict(BaseModel):
 
     created_at: str = Field(default_factory=utc_now)
     """When the verdict was authored."""
+
+
+# ── ChainHop / ChainPlan (the section-2.3 composition record) ─────────────────
+#
+# A chain is a composition over confirmed primitives toward an impact objective.
+# It is recorded in this same ledger — not a parallel store — as a typed
+# :class:`ChainPlan` carrying an ordered vector of :class:`ChainHop`. Two
+# disciplines live in the shape of these objects and are enforced structurally by
+# the section-2.3 gate (:mod:`zen.tools.hunt_topology.chains`), never re-decided
+# here:
+#
+# * **Per-hop distinct-class decomposition.** Every hop — *including the terminal
+#   hop that reaches the objective* — carries its OWN enumerated candidate
+#   primitive and the (possibly different) class it belongs to. That is the field
+#   shape that makes it structurally impossible for a chain to be "modeled through
+#   a single framing" that swallows a terminal hop of a different class: the
+#   terminal hop is its own entry with its own fields, or the gate rejects the
+#   plan before composition. It is the owner/field/gate/probe discipline of 1.5
+#   applied to chain hops.
+# * **Confirmed-primitive advancement.** A hop is "done" only when its
+#   ``finding_id`` names a :class:`Finding` the ledger holds in ``confirmed`` —
+#   i.e. one that reached ``confirmed`` through a passing
+#   :class:`ValidatorVerdict` (the section-2.2 socket). The hop stores *the
+#   reference*, not a second "confirmed" flag: whether a hop is satisfied is
+#   always read back from the finding's own state, so there is exactly one notion
+#   of "confirmed" in the engine. A hop that could not be driven to a confirmed
+#   primitive is recorded UNACHIEVED by setting ``unachieved_disposition`` — a
+#   disposition, never a silent drop.
+#
+# Class-agnostic throughout: a hop names a surface, a candidate class slug (used
+# as data), and a free-text primitive description; it privileges no class and
+# encodes no particular class sequence.
+
+
+class ChainHop(BaseModel):
+    """One hop of a chain: a distinct candidate primitive and the class it is.
+
+    A hop is the typed form of "this step of the chain establishes *this*
+    capability on *this* surface, by *this* class." The three fields that carry
+    the per-hop distinct-class decomposition — ``target_surface``,
+    ``candidate_class``, ``candidate_primitive`` — are what the section-2.3 gate
+    reads; a hop that leaves any of them empty, or a terminal hop that merely
+    echoes an earlier hop's primitive, is an incomplete decomposition the gate
+    rejects.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0)
+    """This hop's position in the chain (0 = the first hop). The ordering the
+    advancement check walks: a hop may be claimed only once every earlier hop is
+    confirmed."""
+
+    target_surface: str = ""
+    """The surface this hop acts on, by the run's own surface id (a
+    :class:`SurfaceNode` ``id``). Where the hop's candidate primitive lives."""
+
+    candidate_class: str = ""
+    """The vulnerability class of *this hop's* candidate primitive, as a catalog
+    slug used as data. Deliberately a free string, not catalog-validated: the
+    decomposition gate keys on its *presence* (every hop names a class), never on
+    *which* class appears — the forcing function must stay class-agnostic, and the
+    hop's confirmed primitive is already a single-class :class:`Finding` validated
+    at hunt time. The gate rejects a hop that leaves this empty."""
+
+    candidate_primitive: str = ""
+    """A description of the distinct candidate primitive this hop establishes —
+    the capability the chain gains here. Every hop carries its own, *including the
+    terminal hop*; a terminal hop that reuses an earlier hop's primitive is the
+    "collapse into one framing" the gate refuses."""
+
+    terminal: bool = False
+    """Whether this hop is the one that reaches the chain's impact objective.
+    Exactly one hop is terminal; the gate rejects a plan that enumerates none (the
+    under-modeled-terminal-hop failure) or more than one."""
+
+    hypothesis_id: str = ""
+    """Id of the :class:`Hypothesis` that is this hop's candidate primitive, if
+    one is tracked in the threat model — so the hop reconciles to the lead that
+    motivated it."""
+
+    finding_id: str = ""
+    """Id of the :class:`Finding` whose ``confirmed`` state satisfies this hop.
+    This is the section-2.2 socket the advancement check reads: a hop is confirmed
+    iff this names a finding the ledger holds in ``confirmed`` (reached only
+    through a passing :class:`ValidatorVerdict`). The hop stores the reference,
+    never a second "confirmed" flag — there is one notion of confirmed."""
+
+    unachieved_disposition: HypothesisDisposition | None = None
+    """How this hop was handled when it could *not* be driven to a confirmed
+    primitive — one of :data:`~zen.tools.threat_model.schema.HYPOTHESIS_DISPOSITION_VALUES`.
+    Recording a hop UNACHIEVED is a disposition, not a silent drop: the chain
+    cannot be *claimed* past an unconfirmed hop, but a dispositioned hop does not
+    leave an open lead dangling. ``None`` on a hop that is confirmed or still being
+    driven."""
+
+    unachieved_reason: str = ""
+    """Free-text reason for an ``unachieved_disposition`` — why this hop's
+    primitive could not be confirmed this engagement. Advisory for the reader."""
+
+    rationale: str = ""
+    """Free-text reasoning for the model's benefit — context, not contract; the
+    typed fields above are what the gate and the advancement check read."""
+
+
+class ChainPlan(BaseModel):
+    """A chaining agent's composition over confirmed primitives toward an impact.
+
+    The structured artifact the section-2.3 chaining agent records to the ledger:
+    an ordered ``hops`` vector plus the ``impact_objective`` the composition aims
+    to reach. It is a *composition over confirmed Findings* — each hop references
+    the finding whose confirmed state satisfies it — recorded in the same
+    append-only ledger as every other research object, not a parallel store.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    """Stable handle for this chain within the run."""
+
+    objective: str = ""
+    """What end-to-end impact this chain composes toward, in one or two
+    sentences — the consequence the terminal hop reaches."""
+
+    impact_objective: ImpactRung
+    """The rung on the impact ladder (``reach`` → ``trigger`` → ``primitive`` →
+    ``weaponized`` → ``chained``) the composed chain aims to reach. Consequence,
+    not difficulty — reaching it is what the terminal hop demonstrates."""
+
+    hops: list[ChainHop] = Field(default_factory=list)
+    """The ordered hops, front-most first. The per-hop status vector is *derived*,
+    not stored: each hop's satisfaction is read back from its ``finding_id``'s own
+    confirmed state, so the plan never carries a second notion of "confirmed."""
+
+    author: str = ""
+    """Id of the chaining agent that composed this chain."""
+
+    created_at: str = Field(default_factory=utc_now)
+    """When the chain was recorded."""
+
+    rationale: str = ""
+    """Free-text reasoning from the composer for the model's benefit — context,
+    not contract."""

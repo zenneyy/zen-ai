@@ -272,6 +272,17 @@ ignore = [
 # The Hypothesis/Finding field-type Literals are imported for pydantic's runtime
 # get_type_hints(), so they must stay out of a type-checking-only block.
 "zen/tools/threat_model/schema.py" = ["TC001"]
+# The ChainPlan/ChainHop field-type Literals (ImpactRung, HypothesisDisposition)
+# are imported for pydantic's runtime get_type_hints(), as in schema.py above.
+"zen/tools/ledger/objects.py" = ["TC001"]
+# The section-2.3 decomposition gate is imported lazily inside record_chain so the
+# foundational ledger store does not take a module-scope dependency on the
+# higher-level hunt_topology package (a layering inversion); it fires only when a
+# chain is recorded.
+"zen/tools/ledger/store.py" = ["PLC0415"]
+# SDK function-tool: get_type_hints() at registration evaluates RunContextWrapper,
+# so it is imported eagerly, not under TYPE_CHECKING (mirrors the tool files below).
+"zen/tools/hunt_topology/tools.py" = ["TC002"]
 # One hypothesis (or dismissal) is one physical line by convention, so these
 # fixtures exceed the line length by design.
 "tests/test_threat_model_tool.py" = ["E501"]

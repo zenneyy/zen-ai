@@ -15,6 +15,8 @@ See :class:`~zen.tools.ledger.store.ResearchLedger` for the store itself,
 from __future__ import annotations
 
 from zen.tools.ledger.objects import (
+    ChainHop,
+    ChainPlan,
     CoverageCell,
     Evidence,
     EvidenceReplay,
@@ -41,6 +43,8 @@ from zen.tools.ledger.store import (
 
 
 __all__ = [
+    "ChainHop",
+    "ChainPlan",
     "CoverageCell",
     "DanglingEvidenceError",
     "Evidence",

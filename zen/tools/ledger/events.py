@@ -27,6 +27,7 @@ from zen.tools.ledger.objects import utc_now
 
 __all__ = [
     "AMENDMENT_APPENDED",
+    "CHAIN_RECORDED",
     "COVERAGE_RECORDED",
     "EVIDENCE_RECORDED",
     "FINDING_CONFIRMED",
@@ -35,6 +36,7 @@ __all__ = [
     "MODEL_SAVED",
     "NOTE_DELETED",
     "NOTE_RECORDED",
+    "OBJECT_CHAIN",
     "SURFACE_OBSERVED",
     "VERDICT_RECORDED",
     "LedgerEvent",
@@ -49,6 +51,9 @@ OBJECT_EVIDENCE = "evidence"
 OBJECT_FINDING = "finding"
 OBJECT_VERDICT = "validator_verdict"
 OBJECT_NOTE = "note"
+# The section-2.3 chain composition: an ordered hop vector over confirmed
+# primitives toward an impact objective, stored like every other typed object.
+OBJECT_CHAIN = "chain_plan"
 
 # Event kinds — human-readable colour for the log. The fold is driven by
 # object_type + object_version, so these never have to be exhaustive; a new kind
@@ -64,6 +69,7 @@ FINDING_CONFIRMED = "finding_confirmed"
 VERDICT_RECORDED = "verdict_recorded"
 NOTE_RECORDED = "note_recorded"
 NOTE_DELETED = "note_deleted"
+CHAIN_RECORDED = "chain_recorded"
 
 
 @dataclass(frozen=True)

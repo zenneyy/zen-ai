@@ -126,6 +126,55 @@ checklist step.
   tooling it references, so pass a `tooling/*` slug only for a tool beyond that
   auto-loaded set.
 
+## Discovery fan-out, chaining, and bypassing
+
+Hunting has a breadth half and a depth half, and they are dispatched differently.
+
+- **Fan discovery out across independent class×surface cells.** Draw the cells
+  from two sources you already own: the architecture-implied-classes enumeration
+  (the classes the structure implies) and the mapped surfaces (the reachable
+  points recon established). Each cell is one candidate class paired with one
+  surface, and each becomes a single-class hunter scoped to that cell — exactly
+  the one-class-per-hunter rule, now applied as a grid. Cells are independent at
+  dispatch: a discovery hunter must be able to start without waiting on another
+  cell's confirmed result, so independent hunters run in parallel and their
+  writes to the shared ledger never collide.
+- **Split independent cells from dependent ones.** A cell whose surface is
+  reachable only *through* another component — an internal service behind a
+  server-side request, a tier reached only after an earlier primitive fires — is
+  not an independent discovery cell: investigating it *depends* on first
+  establishing the reach. Route those to the chaining phase, where the reach is a
+  prior hop, rather than dispatching a discovery hunter that cannot begin.
+- **Scale the hunter count to the surface, and record the allocation.** The number
+  of parallel discovery hunters follows the surface size — the count of surfaces
+  and of independent cells — not a fixed number: a small surface earns a few, a
+  large one earns more, up to a ceiling that prevents both sprawl and
+  under-staffing. Record the chosen allocation (a note is enough) so the decision
+  is auditable rather than ad hoc.
+- **Reserve a bounded budget for unscoped exploration.** A rigid up-front partition
+  into cells leaves surface unexamined, so keep an explicit, bounded budget for
+  investigation *outside* the enumerated cells — enough to catch what the grid
+  missed, never so much that it consumes the run. Findings from unscoped
+  exploration flow into the same ledger and the same confirmation path as every
+  other finding.
+
+- **Dispatch a chaining agent to compose confirmed primitives.** When an impact
+  needs several primitives carried end to end — a dependent cell, or a multi-step
+  objective no single hunter reaches — hand it to a `chaining` agent. It runs in
+  ONE long-lived context (never fragmented into per-hop children): it decomposes
+  the chain into a distinct candidate primitive per hop, *including the terminal
+  hop of whatever class actually reaches the objective*, and it advances past a
+  hop only once that hop's primitive is confirmed — a reached surface is never a
+  performed hop. Give it the confirmed primitives it should build on and the
+  impact objective; let it drive any still-unconfirmed hop through a single-class
+  hunter.
+- **Dispatch a bypassing agent instead of abandoning a blocked surface.** When a
+  control stops a primitive and the hunter cannot get past it in-class, hand the
+  blocked primitive to a `bypassing` agent (also one long-lived context). It
+  characterizes the control, defeats or routes through it, and confirms the bypass
+  through the validator path — rather than letting a defended surface be recorded
+  as clean. A surface under a control is covered, not abandoned.
+
 ## Reconcile before finishing
 
 Coverage entries are shared and mutable. Before you finish, walk the

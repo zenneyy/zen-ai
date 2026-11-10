@@ -32,6 +32,17 @@ from zen.tools.agents_graph.contracts import HuntReport, HuntTask, ImpactRung
 from zen.tools.agents_graph.tools import AgentRole, agent_finish, create_agent
 from zen.tools.coverage.tools import list_coverage, record_coverage
 from zen.tools.finish.tool import finish_scan
+from zen.tools.hunt_topology.chains import (
+    CONFIRMED_ADVANCEMENT_DESCRIPTION,
+    DECOMPOSITION_GATE_DESCRIPTION,
+    SINGLE_CONTEXT_DESCRIPTION,
+)
+from zen.tools.hunt_topology.discovery import (
+    DISCOVERY_FANOUT_DESCRIPTION,
+    EFFORT_SCALING_DESCRIPTION,
+    UNSCOPED_EXPLORATION_DESCRIPTION,
+)
+from zen.tools.hunt_topology.tools import record_chain_plan
 from zen.tools.ledger.objects import ValidatorVerdict
 from zen.tools.reporting.tool import create_vulnerability_report
 from zen.tools.threat_model.implied_classes import IMPLIED_CLASS_GATE_DESCRIPTION
@@ -67,6 +78,7 @@ _ALL_TOOLS = (
     create_agent,
     agent_finish,
     finish_scan,
+    record_chain_plan,
 )
 _TOOLS_BY_NAME = {tool.name: tool for tool in _ALL_TOOLS}
 
@@ -101,6 +113,28 @@ ROLE_TOOLS: dict[str, list[str]] = {
         "record_coverage",
         "agent_finish",
     ],
+    # The section-2.3 chaining composer owns the chain plan it records: it reads
+    # the shared model, records the chain through the decomposition gate, covers
+    # what it composed, and files the demonstrated end-to-end chain as a report.
+    # It is a COMPOSER over single-class confirmed primitives, not a filer of
+    # multi-class findings.
+    "chaining": [
+        "record_chain_plan",
+        "get_threat_model",
+        "record_coverage",
+        "create_vulnerability_report",
+        "agent_finish",
+    ],
+    # The section-2.3 bypassing composer owns the control characterization and the
+    # defeat it records: it reads the shared model, amends it with the control it
+    # characterized, covers the bypass attempt, and files the confirmed bypass.
+    "bypassing": [
+        "get_threat_model",
+        "amend_threat_model",
+        "record_coverage",
+        "create_vulnerability_report",
+        "agent_finish",
+    ],
 }
 
 # A one-line statement of what each role's outputs are, rendered under "Artifacts
@@ -121,6 +155,16 @@ _ROLE_ARTIFACTS: dict[str, str] = {
     "reviewer": (
         "the verdicts you author — each confirming or rejecting a candidate finding on behavior "
         "you re-observed yourself, from a clean context, never on the hunter's narrative."
+    ),
+    "chaining": (
+        "the chain compositions you record — each an ordered vector of distinct per-hop "
+        "primitives toward an impact objective, advanced only on confirmed primitives — and the "
+        "demonstrated end-to-end chain you file as a report. You compose; you do not hunt a class."
+    ),
+    "bypassing": (
+        "the controls you characterize and the bypasses you confirm — each a control that blocked "
+        "a primitive, defeated and validated so the blocked primitive advances toward "
+        "confirmation. You defeat obstacles on a surface; you do not abandon it."
     ),
 }
 
@@ -359,6 +403,21 @@ def _root_requirements() -> list[ContractRequirement]:
                 f"(`{DISPOSITION_LINE_EXAMPLE}`), or defer it, before you finish."
             ),
         ),
+        ContractRequirement(
+            key="Parallel discovery fan-out",
+            group="gates",
+            text=f"Parallel discovery fan-out — {DISCOVERY_FANOUT_DESCRIPTION}",
+        ),
+        ContractRequirement(
+            key="Effort-scaling",
+            group="gates",
+            text=f"Effort-scaling — {EFFORT_SCALING_DESCRIPTION}",
+        ),
+        ContractRequirement(
+            key="Unscoped exploration",
+            group="gates",
+            text=f"Unscoped exploration — {UNSCOPED_EXPLORATION_DESCRIPTION}",
+        ),
     ]
 
 
@@ -412,11 +471,108 @@ def _reviewer_requirements() -> list[ContractRequirement]:
     ]
 
 
+def _chaining_requirements() -> list[ContractRequirement]:
+    impact_ladder = " → ".join(get_args(ImpactRung))
+    return [
+        _tool_requirement("record_chain_plan", declared=("chain_plan",)),
+        _tool_requirement("get_threat_model", declared=("target",)),
+        _tool_requirement("record_coverage", declared=_RECORD_COVERAGE_FIELDS),
+        _tool_requirement("create_vulnerability_report"),
+        _tool_requirement("agent_finish", declared=("result_summary",)),
+        ContractRequirement(
+            key="Per-hop distinct-class decomposition",
+            group="gates",
+            text=f"Per-hop distinct-class decomposition — {DECOMPOSITION_GATE_DESCRIPTION}",
+        ),
+        ContractRequirement(
+            key="Confirmed-primitive advancement",
+            group="gates",
+            text=f"Confirmed-primitive advancement — {CONFIRMED_ADVANCEMENT_DESCRIPTION}",
+        ),
+        ContractRequirement(
+            key="Single long-lived context",
+            group="gates",
+            text=f"Single long-lived context — {SINGLE_CONTEXT_DESCRIPTION}",
+        ),
+        ContractRequirement(
+            key="impact ladder",
+            group="gates",
+            text=(
+                f"Compose along the impact ladder ({impact_ladder}) — consequence, not "
+                "difficulty. The chain is claimed to a rung only when every hop up to and "
+                "including the terminal hop is confirmed."
+            ),
+        ),
+        ContractRequirement(
+            key="single-class composition",
+            group="gates",
+            text=(
+                "You are a single-class composition role: each hop's primitive stays a "
+                "single-class finding confirmed via the validator path, and you do not file "
+                "multi-class findings. The demonstrated end-to-end chain itself is filed with "
+                "`create_vulnerability_report`."
+            ),
+        ),
+    ]
+
+
+def _bypassing_requirements() -> list[ContractRequirement]:
+    return [
+        _tool_requirement("get_threat_model", declared=("target",)),
+        _tool_requirement("amend_threat_model", declared=("target", "addendum")),
+        _tool_requirement("record_coverage", declared=_RECORD_COVERAGE_FIELDS),
+        _tool_requirement("create_vulnerability_report"),
+        _tool_requirement("agent_finish", declared=("result_summary",)),
+        ContractRequirement(
+            key="Characterize-then-defeat",
+            group="gates",
+            text=(
+                "Characterize-then-defeat — treat every control that blocks the current primitive "
+                "as an obstacle to characterize then defeat, never a reason to abandon the "
+                "surface: identify the control, model why it blocks the primitive, attempt to "
+                "defeat or route through it, and empirically validate the bypass. The procedure "
+                "is generic — it names no specific control or technique."
+            ),
+        ),
+        ContractRequirement(
+            key="Confirm the bypass via the validator path",
+            group="gates",
+            text=(
+                "Confirm the bypass via the validator path — a defeated control is evidence that "
+                "advances the blocked primitive toward confirmation; the primitive reaches "
+                "'confirmed' only through a passing validator verdict (the same confirmed notion "
+                "the validator socket enforces), never because the surface was reached again."
+            ),
+        ),
+        ContractRequirement(
+            key="The surface is not abandoned",
+            group="gates",
+            text=(
+                "The surface is not abandoned — the characterized control and the defeat attempt "
+                "are recorded: a surface under a control is covered with the bypass attempt and "
+                "its outcome, not silently abandoned. A control you cannot defeat this engagement "
+                "is recorded as such — with the gap — as a disposition, never dropped."
+            ),
+        ),
+        ContractRequirement(
+            key="one long-lived context",
+            group="gates",
+            text=(
+                "You run in one long-lived context — bypassing is dependency-heavy, not "
+                "breadth-parallel, so you hold the whole characterize→defeat→validate loop in one "
+                "context rather than fragmenting it across short-lived agents."
+            ),
+        ),
+    ]
+
+
 _ROLE_REQUIREMENTS = {
     "recon": _recon_requirements,
     "hunter": _hunter_requirements,
     "root": _root_requirements,
     "reviewer": _reviewer_requirements,
+    "chaining": _chaining_requirements,
+    "bypassing": _bypassing_requirements,
 }
 
 
