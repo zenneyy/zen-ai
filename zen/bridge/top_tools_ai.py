@@ -36,6 +36,7 @@ Then point Zen at it:
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import logging
 import os
@@ -49,6 +50,8 @@ from urllib import parse as urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
+
+from zen.bridge.errors import ERROR_DETAIL_MAX_CHARS, BaseBridgeError, scrub
 
 
 if TYPE_CHECKING:
@@ -95,7 +98,7 @@ def _upstream_reasoning(payload: dict[str, Any]) -> str:
     return _to_top_tools_reasoning(effort)
 
 
-class BridgeError(RuntimeError):
+class BridgeError(BaseBridgeError):
     """A request could not be served."""
 
 
@@ -150,7 +153,9 @@ def resolve_config() -> dict[str, str]:
     if not api_key:
         raise BridgeError(
             "No Top Tools AI API key found. Set TOP_TOOLS_AI_API_KEY or add a "
-            "'top-tools-ai' entry to ~/.ultron/providers.json."
+            "'top-tools-ai' entry to ~/.ultron/providers.json.",
+            status=401,
+            code="upstream_key_missing",
         )
     return {"base_url": _validated_base_url(base_url), "api_key": api_key}
 
@@ -235,6 +240,62 @@ def _session() -> Any:
     return _SESSION
 
 
+# An upstream error status is passed on to the client unchanged. Any other answer
+# that is not a 200 is not an error the client could act on, and becomes a 502.
+_ERROR_STATUS_MIN = 400
+_ERROR_STATUS_MAX = 599
+
+
+def _text_field(source: dict[str, Any], key: str) -> str | None:
+    """A non-empty string or a number under ``key``, as text; otherwise None."""
+    value = source.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    return value if isinstance(value, str) and value else None
+
+
+def _upstream_failure(status: int, text: str, api_key: str) -> BridgeError:
+    """The error for an upstream answer that is not a 200.
+
+    The upstream's status is kept, so the client sees what the upstream said and
+    not a gateway fault. When the body is an OpenAI-style error object, its
+    ``type``, ``code`` and ``param`` are kept as well. The upstream key, and
+    anything shaped like a credential, is removed before anything is passed on.
+    """
+    message = text.strip()
+    error_type: str | None = None
+    code: str | None = None
+    param: str | None = None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    reported = parsed.get("error") if isinstance(parsed, dict) else None
+    if isinstance(reported, dict):
+        message = _text_field(reported, "message") or message
+        error_type = _text_field(reported, "type")
+        code = _text_field(reported, "code")
+        param = _text_field(reported, "param")
+    elif isinstance(reported, str) and reported:
+        message = reported
+
+    detail = scrub(message, api_key)[:ERROR_DETAIL_MAX_CHARS] or f"status {status}"
+    if status < _ERROR_STATUS_MIN or status > _ERROR_STATUS_MAX:
+        return BridgeError(
+            f"upstream returned unexpected status {status}: {detail}",
+            code="upstream_unexpected_status",
+        )
+    return BridgeError(
+        f"upstream returned {status}: {detail}",
+        status=status,
+        error_type=scrub(error_type or "upstream_error", api_key),
+        code=scrub(code, api_key) if code else None,
+        param=scrub(param, api_key) if param else None,
+    )
+
+
 def _open_upstream(
     *,
     url: str,
@@ -247,7 +308,9 @@ def _open_upstream(
 
     Returns the live ``requests.Response``; the caller owns closing it. Raises
     ``BridgeError`` only once every attempt is used, so zen's own 2s..90s
-    backoff engages just for failures that are actually persistent.
+    backoff engages just for failures that are actually persistent. The error
+    carries the last status the upstream gave, or 502 when it could not be
+    reached at all.
 
     A non-retryable status (401/403/400 ...) is returned as-is rather than
     raised, so callers can surface the upstream's own error body.
@@ -260,15 +323,18 @@ def _open_upstream(
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     last_detail = ""
+    last_status: int | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             resp = _session().post(url, data=body, headers=headers, timeout=timeout, stream=stream)
         except requests.RequestException as exc:
-            last_detail = f"{type(exc).__name__}: {exc}"
+            last_detail = scrub(f"{type(exc).__name__}: {exc}", api_key)
+            last_status = None
         else:
             if resp.status_code not in _RETRY_STATUSES:
                 return resp
             last_detail = f"HTTP {resp.status_code}"
+            last_status = resp.status_code
             resp.close()
 
         if attempt < _MAX_ATTEMPTS:
@@ -282,7 +348,10 @@ def _open_upstream(
             )
             time.sleep(delay)
 
-    raise BridgeError(f"upstream failed after {_MAX_ATTEMPTS} attempts: {last_detail}")
+    message = f"upstream failed after {_MAX_ATTEMPTS} attempts: {last_detail}"
+    if last_status is None:
+        raise BridgeError(message, code="upstream_unreachable")
+    raise BridgeError(message, status=last_status, error_type="upstream_error")
 
 
 def _post_upstream(
@@ -340,9 +409,9 @@ def _stream_upstream(
         stream=True,
     )
     if resp.status_code != 200:
-        detail = resp.text[:500]
+        detail = resp.text
         resp.close()
-        raise BridgeError(f"upstream returned {resp.status_code}: {detail}")
+        raise _upstream_failure(resp.status_code, detail, api_key)
 
     with resp:
         buf = b""
@@ -446,9 +515,14 @@ def handle_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
         payload=upstream_payload,
         timeout=_UPSTREAM_TIMEOUT_S,
     )
-    if status != 200 or body is None:
-        detail = text[:500] if text else f"status {status}"
-        raise BridgeError(f"upstream returned {status}: {detail}")
+    if status != 200:
+        raise _upstream_failure(status, text, config["api_key"])
+    if body is None:
+        detail = scrub(text, config["api_key"])[:ERROR_DETAIL_MAX_CHARS]
+        raise BridgeError(
+            f"upstream returned 200 with a body that is not JSON: {detail}",
+            code="upstream_invalid_response",
+        )
     # The upstream response is already OpenAI-shaped; pass it through. We only
     # normalise the model field so zen's bookkeeping matches what it asked
     # for, and ensure 'usage' exists (some providers omit it on errors).
@@ -467,27 +541,58 @@ def handle_chat_completion_stream(payload: dict[str, Any]) -> Iterator[str]:
 
     The upstream already emits OpenAI ``chat.completion.chunk`` objects, so we
     only normalise the model id to what zen asked for.
+
+    A failure before the first frame is raised, and the caller answers it with
+    a status. Once a frame has been handed over the caller has sent its
+    headers, so a later failure cannot change the status any more: it is
+    yielded as a final OpenAI error frame, with no ``[DONE]`` after it, and the
+    client raises an API error instead of taking a cut-off reply as complete.
     """
     config = resolve_config()
     upstream_payload = _build_upstream_payload(payload)
     upstream_payload["stream"] = True
     requested_model = payload.get("model") or _DEFAULT_MODEL
 
-    for kind, parsed, raw in _stream_upstream(
-        base_url=config["base_url"],
-        api_key=config["api_key"],
-        payload=upstream_payload,
-        timeout=_UPSTREAM_TIMEOUT_S,
-    ):
-        if kind == "done":
-            yield "data: [DONE]\n\n"
-            return
-        if parsed is None:
-            # Unparseable upstream line -- pass through verbatim.
-            yield f"data: {raw}\n\n"
-            continue
-        parsed.setdefault("model", requested_model)
-        yield f"data: {json.dumps(parsed, ensure_ascii=False)}\n\n"
+    handed_over = False
+    try:
+        for kind, parsed, raw in _stream_upstream(
+            base_url=config["base_url"],
+            api_key=config["api_key"],
+            payload=upstream_payload,
+            timeout=_UPSTREAM_TIMEOUT_S,
+        ):
+            if kind == "done":
+                yield "data: [DONE]\n\n"
+                return
+            if parsed is None:
+                # Unparseable upstream line -- pass through verbatim.
+                yield f"data: {raw}\n\n"
+            else:
+                parsed.setdefault("model", requested_model)
+                yield f"data: {json.dumps(parsed, ensure_ascii=False)}\n\n"
+            handed_over = True
+    except BridgeError:
+        raise
+    except Exception as exc:
+        if not handed_over:
+            raise
+        detail = scrub(f"{type(exc).__name__}: {exc}", config["api_key"])
+        logger.warning("upstream stream failed after the response had started: %s", detail)
+        yield _stream_error_frame(detail)
+
+
+def _stream_error_frame(detail: str) -> str:
+    """The frame that ends a stream which failed after its headers were sent."""
+    failure = BridgeError(
+        f"upstream stream failed after the response had started: {detail}",
+        code="upstream_stream_interrupted",
+    )
+    return f"data: {json.dumps(failure.body(), ensure_ascii=False)}\n\n"
+
+
+def _in_order(first: str, frames: Iterator[str]) -> Iterator[str]:
+    """The first frame, already pulled, then the rest as each one arrives."""
+    return itertools.chain((first,), frames)
 
 
 # --- HTTP server ----------------------------------------------------------
@@ -512,9 +617,11 @@ class _Handler(BaseHTTPRequestHandler):
 
         No ``Content-Length``: the body length isn't known up front, and the
         handler's HTTP/1.0 response closes the connection to delimit the body.
-        The first frame is pulled *before* the headers go out so an upstream
-        failure still surfaces as a clean 502 rather than a 200 with an empty
-        body.
+        The first frame is pulled *before* the headers go out, so a failure the
+        upstream reports up front is still answered with its own status rather
+        than a 200 with an empty body. Each later frame is written as soon as
+        it arrives; a failure after the headers reaches the client as the
+        stream's final error frame (see :func:`handle_chat_completion_stream`).
         """
         try:
             first = next(frames)
@@ -527,7 +634,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
 
-        for frame in (first, *frames) if first else frames:
+        for frame in _in_order(first, frames) if first else frames:
             self.wfile.write(frame.encode("utf-8"))
             self.wfile.flush()
 
@@ -588,8 +695,8 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, handle_chat_completion(payload))
         except BridgeError as exc:
-            logger.warning("bridge request failed: %s", exc)
-            self._send_json(502, {"error": {"message": str(exc), "type": "bridge_error"}})
+            logger.warning("bridge request failed with HTTP %d: %s", exc.status, exc)
+            self._send_json(exc.status, exc.body())
         except Exception as exc:
             logger.exception("bridge request crashed")
             self._send_json(500, {"error": {"message": f"{type(exc).__name__}: {exc}"}})

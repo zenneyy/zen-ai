@@ -59,6 +59,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 import tempfile
 
+from zen.bridge.errors import ERROR_DETAIL_MAX_CHARS, BaseBridgeError, scrub
+
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +130,7 @@ def _resolve_effort(payload: dict[str, Any]) -> str | None:
     return None
 
 
-class BridgeError(RuntimeError):
+class BridgeError(BaseBridgeError):
     """A request could not be served."""
 
 
@@ -448,6 +450,11 @@ class _Turn:
     calls: list[dict[str, Any]] = field(default_factory=list)
     text: str = ""
     error: str = ""
+    # Set only on an error turn the upstream itself refused: the HTTP status to
+    # answer with, and the SDK's name for the kind of failure. Left at zero, the
+    # failure has no upstream status and is answered as a 502.
+    status: int = 0
+    code: str = ""
     # Token usage for the Agent SDK query cycle that just ended. Populated
     # only on the ``kind="text"`` turn that closes a cycle; tool-call turns
     # within the same cycle carry zeros because the SDK reports usage once
@@ -499,6 +506,43 @@ def _usage_from_result(msg: Any) -> tuple[int, int, int, int]:
             completion = int(raw.get("output_tokens", 0) or 0)
             cached = int(raw.get("cache_read_input_tokens", 0) or 0)
     return prompt, completion, cached, prompt + completion
+
+
+# The Agent SDK raises nothing when the upstream refuses to serve a turn. The
+# turn's result is flagged ``is_error`` and carries the failed API call's HTTP
+# status in ``api_error_status``, and the assistant message that wraps the
+# failure is typed through its ``error`` field. Read as plain text, such a turn
+# reaches zen as a reply from the model; zen answers a reply without a tool call
+# by prompting again, so a rejected sign-in is presented once per recovery
+# attempt.
+#
+# Only a sign-in or permission refusal becomes an HTTP error here. It is
+# terminal, so nothing replays the turn. Every other failure the SDK reports
+# this way is passed on as before: zen would retry it, and this bridge cannot
+# replay a turn into a conversation the SDK is still holding.
+_SIGN_IN_STATUSES = frozenset({401, 403})
+_SIGN_IN_KINDS = {"authentication_failed": 401, "oauth_org_not_allowed": 403}
+_SIGN_IN_HINT = " (sign in again with 'claude /login'; the bridge needs no restart)"
+
+
+def _sign_in_failure(result: Any, error_kind: str | None, text: str) -> _Turn | None:
+    """The error turn for a result that reports a sign-in or permission refusal."""
+    if result is None or not getattr(result, "is_error", False):
+        return None
+    status = getattr(result, "api_error_status", None)
+    if status not in _SIGN_IN_STATUSES:
+        status = _SIGN_IN_KINDS.get(error_kind or "")
+    if status is None:
+        return None
+    reported = str(getattr(result, "result", None) or text or "the request was refused")
+    detail = scrub(reported)[:ERROR_DETAIL_MAX_CHARS]
+    hint = _SIGN_IN_HINT if status == 401 else ""
+    return _Turn(
+        kind="error",
+        error=f"upstream returned {status}: {detail}{hint}",
+        status=status,
+        code=error_kind or "",
+    )
 
 
 class _Session:
@@ -633,9 +677,12 @@ class _Session:
 
         text: list[str] = []
         usage: tuple[int, int, int, int] = (0, 0, 0, 0)
+        error_kind: str | None = None
+        result: Any = None
         try:
             async for msg in self._client.receive_response():
                 if isinstance(msg, AssistantMessage):
+                    error_kind = getattr(msg, "error", None) or error_kind
                     text.extend(
                         block.text
                         for block in msg.content
@@ -643,10 +690,15 @@ class _Session:
                     )
                 elif isinstance(msg, ResultMessage):
                     usage = _usage_from_result(msg)
+                    result = msg
                     break
         except Exception as exc:
             logger.debug("session drain failed", exc_info=True)
             self._events.put(_Turn(kind="error", error=f"{type(exc).__name__}: {exc}"))
+            return
+        refused = _sign_in_failure(result, error_kind, "".join(text).strip())
+        if refused is not None:
+            self._events.put(refused)
             return
         # A turn that parked on a tool call already emitted its event.
         with self._lock:
@@ -883,6 +935,13 @@ def handle_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
 
     if turn.kind == "error":
         _POOL.drop(key)
+        if turn.status:
+            raise BridgeError(
+                turn.error,
+                status=turn.status,
+                error_type="upstream_error",
+                code=turn.code or None,
+            )
         raise BridgeError(turn.error)
     if turn.kind == "tool":
         return _as_tool_calls_response(model, turn.calls, turn)
@@ -955,8 +1014,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             body = handle_chat_completion(payload)
         except BridgeError as exc:
-            logger.warning("bridge request failed: %s", exc)
-            self._send_json(502, {"error": {"message": str(exc), "type": "bridge_error"}})
+            logger.warning("bridge request failed with HTTP %d: %s", exc.status, exc)
+            self._send_json(exc.status, exc.body())
             return
         except Exception as exc:
             logger.exception("bridge request crashed")
