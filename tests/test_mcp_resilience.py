@@ -22,6 +22,7 @@ from zen.tools.mcp.failures import FailureInfo, HttpStatusRecorder, classify
 _test_mcp_client = importlib.import_module("tests.test_mcp_client")
 FakeMCPServer: Any = _test_mcp_client.FakeMCPServer
 _mcp_tool: Any = _test_mcp_client._mcp_tool
+_pump_until: Any = _test_mcp_client._pump_until
 
 
 def _built_server(server: Any) -> Any:
@@ -519,3 +520,161 @@ async def test_resilience_logs_do_not_include_request_secrets(
     assert "secret-header" not in caplog.text
     assert "secret-body" not in caplog.text
     await session.aclose()
+
+
+# --- A 401 or 403 at the session layer ---------------------------------------
+#
+# The tests below pin what one session does with a 401 or a 403. The session
+# disposes its server before any retry, so every retry starts with a build and
+# the number of builds is the number of connection attempts. They make no
+# statement about what happens to a session after it is retired.
+#
+# Each supervised session is closed in a ``finally``: a session left open by a
+# failed assertion keeps a supervising task that absorbs the cancellation the
+# event loop sends at teardown, and the loop would never finish closing.
+
+
+def _connect_error_server(name: str, error: BaseException) -> Any:
+    server = FakeMCPServer(name, [_mcp_tool("read")])
+
+    async def connect() -> None:
+        raise error
+
+    server.connect = connect
+    return server
+
+
+def _serve_builds(monkeypatch: pytest.MonkeyPatch, *built: Any) -> list[Any]:
+    """Hand out ``built`` in order from ``_build_server``; return the ones handed out."""
+    served: list[Any] = []
+
+    def build(_config: Any) -> Any:
+        served.append(built[len(served)])
+        return served[-1]
+
+    monkeypatch.setattr(mcp_client, "_build_server", build)
+    return served
+
+
+@pytest.mark.asyncio
+async def test_session_retires_on_a_401_from_list_tools_without_a_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mcp_session, "_retry_delay", _zero_delay)
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    served = _serve_builds(monkeypatch, _built_server(_sequence_server("list-401")))
+    session = mcp_session.SupervisedMcpSession.adopt(
+        _list_tools_error_server("list-401", _http_error(401)),
+        name="list-401",
+        config=_config("list-401"),
+    )
+
+    with pytest.raises(mcp_session.McpConnectionUnavailableError):
+        await session.list_tools()
+
+    assert session.is_dead is True
+    assert served == []
+    await session.aclose()
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        _http_error(401),
+        UserError("Failed to connect to MCP server 'mcp': HTTP error 401 (Unauthorized)"),
+    ],
+    ids=["http-status-error", "sdk-user-error"],
+)
+@pytest.mark.asyncio
+async def test_session_retires_on_a_401_from_reconnect_without_another_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: Exception,
+) -> None:
+    # The first call fails with a retryable status, so the session rebuilds. The
+    # rebuild's connect is refused with a 401 and the session stops there: the
+    # third server, which would serve the call, is never built.
+    monkeypatch.setattr(mcp_session, "_retry_delay", _zero_delay)
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    served = _serve_builds(
+        monkeypatch,
+        _built_server(_sequence_server("reconnect-401", _http_error(503))),
+        _built_server(_connect_error_server("reconnect-401", refusal)),
+        _built_server(_sequence_server("reconnect-401")),
+    )
+    session = mcp_session.SupervisedMcpSession(_config("reconnect-401"))
+    assert await session.start()
+    try:
+        result = await session.dispatch("read", {}, label="reconnect_read")
+    finally:
+        await session.aclose()
+
+    assert result["success"] is False
+    assert session.is_dead is True
+    assert len(served) == 2
+
+
+@pytest.mark.parametrize(("status", "retired"), [(401, True), (403, False)])
+@pytest.mark.asyncio
+async def test_session_does_not_retry_a_cancelled_call_with_a_recorded_401_or_403(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    retired: bool,
+) -> None:
+    # The streamable-HTTP transport reports a refused call as a cancellation of
+    # the supervising task, and the status then comes from the response recorder.
+    # A 401 retires the session and a 403 only fails the call; neither rebuilds,
+    # so the second server, which would serve the call, is never built.
+    monkeypatch.setattr(mcp_session, "_retry_delay", _zero_delay)
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    recorder = HttpStatusRecorder()
+    refused = _sequence_server("cancelled", asyncio.CancelledError())
+    served = _serve_builds(
+        monkeypatch,
+        mcp_client.BuiltMcpServer(refused, recorder),
+        _built_server(_sequence_server("cancelled")),
+    )
+    session = mcp_session.SupervisedMcpSession(_config("cancelled"))
+    assert await session.start()
+    try:
+        await recorder(_http_error(status).response)
+        result = await session.dispatch("read", {}, label="cancelled_read")
+    finally:
+        await session.aclose()
+
+    assert result["success"] is False
+    assert session.is_dead is retired
+    assert session.is_unavailable is False
+    assert len(served) == 1
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.asyncio
+async def test_session_retires_on_an_idle_cancel_with_a_recorded_401_or_403(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    # No call in flight: the transport cancels the supervising task while it
+    # waits for work, and the recorder holds the status. The session is retired
+    # rather than quarantined for a later rebuild, and it answers the next call
+    # without one.
+    recorder = HttpStatusRecorder()
+    served = _serve_builds(
+        monkeypatch,
+        mcp_client.BuiltMcpServer(_sequence_server("idle"), recorder),
+        _built_server(_sequence_server("idle")),
+    )
+    session = mcp_session.SupervisedMcpSession(_config("idle"))
+    assert await session.start()
+    try:
+        await recorder(_http_error(status).response)
+        assert session._task is not None
+        session._task.cancel()
+        await _pump_until(lambda: session.is_dead or session.is_unavailable)
+        retired = session.is_dead
+        result = await session.dispatch("read", {}, label="idle_read")
+    finally:
+        await session.aclose()
+
+    assert retired is True
+    assert result["success"] is False
+    assert len(served) == 1

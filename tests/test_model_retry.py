@@ -88,3 +88,14 @@ def test_policy_helper_matches_statusless_only() -> None:
         )
         is False
     )
+
+
+def test_composed_policy_does_not_retry_a_401_without_provider_advice() -> None:
+    # Scope: the composed policy on its own, given a normalized 401 and no
+    # provider advice. How the SDK normalizes a real error is not asserted here.
+    assert _retries(ModelRetryNormalizedError(status_code=401)) is False
+
+
+def test_composed_policy_does_not_retry_a_403_without_provider_advice() -> None:
+    # Same scope as the 401 case above.
+    assert _retries(ModelRetryNormalizedError(status_code=403)) is False

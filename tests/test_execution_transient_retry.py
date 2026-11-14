@@ -10,8 +10,10 @@ from openai import (
     APIError,
     APIStatusError,
     APITimeoutError,
+    AuthenticationError,
     BadRequestError,
     InternalServerError,
+    PermissionDeniedError,
     RateLimitError,
 )
 
@@ -172,3 +174,138 @@ async def test_run_cycle_does_not_retry_permanent_error(
     streams = [_FakeStream(exc=bad_request), _FakeStream()]
     with pytest.raises(BadRequestError):
         await _run_once(monkeypatch, streams)
+
+
+# --- A status-bearing 401 or 403, at this layer only -------------------------
+#
+# The tests below pin what the transient predicate and the run cycle do with an
+# error that carries a 401 or a 403 status. They make no statement about an error
+# that reaches this layer with another status, or with none.
+
+_REJECTIONS = [(401, "typed"), (403, "typed"), (401, "bare"), (403, "bare")]
+
+
+def _rejection(status: int, shape: str) -> APIStatusError:
+    """A 401 or 403 as the SDK's typed error, or as a bare status error."""
+    if shape == "bare":
+        return _status_error(status)
+    error_type = AuthenticationError if status == 401 else PermissionDeniedError
+    return error_type(
+        f"status {status}",
+        response=httpx.Response(status_code=status, request=_request()),
+        body=None,
+    )
+
+
+class _FakeSession:
+    """A session for the path under test, which only reads the stored items."""
+
+    async def get_items(self) -> list[Any]:
+        return []
+
+
+class _SessionStream(_FakeStream):
+    """A fake stream whose (empty) history the failure path can read back."""
+
+    def to_input_list(self) -> list[Any]:
+        return []
+
+
+async def _run_cycle_capturing(
+    monkeypatch: pytest.MonkeyPatch,
+    streams: list[_FakeStream],
+    *,
+    session: Any = None,
+) -> tuple[APIStatusError | None, int, AgentCoordinator]:
+    """Run one cycle; return the status error raised, the runs started, the coordinator."""
+    _patch_fast_backoff(monkeypatch)
+    started: list[_FakeStream] = []
+
+    def _fake_run_streamed(*_args: Any, **_kwargs: Any) -> _FakeStream:
+        stream = streams[len(started)]
+        started.append(stream)
+        return stream
+
+    monkeypatch.setattr(Runner, "run_streamed", _fake_run_streamed)
+
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "zen", parent_id=None)
+
+    raised: APIStatusError | None = None
+    try:
+        await execution._run_cycle(
+            object(),
+            coordinator,
+            "root",
+            input_data="task",
+            run_config=cast("RunConfig", object()),
+            context={},
+            max_turns=5,
+            session=session,
+            interactive=False,
+            event_sink=None,
+            hooks=None,
+        )
+    except APIStatusError as exc:
+        raised = exc
+    return raised, len(started), coordinator
+
+
+@pytest.mark.parametrize(("status", "shape"), _REJECTIONS)
+def test_transient_predicate_is_false_for_a_status_bearing_401_or_403(
+    status: int, shape: str
+) -> None:
+    assert execution._is_transient_model_error(_rejection(status, shape)) is False
+
+
+@pytest.mark.parametrize(("status", "shape"), _REJECTIONS)
+@pytest.mark.asyncio
+async def test_run_cycle_makes_one_attempt_for_a_status_bearing_401_or_403(
+    monkeypatch: pytest.MonkeyPatch, status: int, shape: str
+) -> None:
+    # No session, so only the transient branch could replay the turn. A second
+    # run would consume the healthy stream and the cycle would return, not raise.
+    rejection = _rejection(status, shape)
+    streams = [_FakeStream(exc=rejection), _FakeStream()]
+
+    raised, attempts, coordinator = await _run_cycle_capturing(monkeypatch, streams)
+
+    assert raised is rejection
+    assert attempts == 1
+    assert coordinator.statuses["root"] == "failed"
+
+
+@pytest.mark.parametrize(("status", "shape"), _REJECTIONS)
+@pytest.mark.asyncio
+async def test_run_cycle_with_a_session_runs_no_recovery_for_a_status_bearing_401_or_403(
+    monkeypatch: pytest.MonkeyPatch, status: int, shape: str
+) -> None:
+    # With a session all three replay branches are reachable. Both recoveries are
+    # replaced by stand-ins that report success, so a branch that was entered
+    # would replay the turn and show up as a second run.
+    strips: list[Any] = []
+    forced_compactions: list[Any] = []
+
+    async def _strip(session: Any) -> bool:
+        strips.append(session)
+        return True
+
+    async def _compact(_agent: Any, session: Any, _run_config: Any, *, force: bool) -> bool:
+        if force:
+            forced_compactions.append(session)
+        return force
+
+    monkeypatch.setattr(execution, "strip_all_images_from_session", _strip)
+    monkeypatch.setattr(execution, "_compact_session", _compact)
+    rejection = _rejection(status, shape)
+    streams: list[_FakeStream] = [_SessionStream(exc=rejection), _SessionStream()]
+
+    raised, attempts, coordinator = await _run_cycle_capturing(
+        monkeypatch, streams, session=_FakeSession()
+    )
+
+    assert raised is rejection
+    assert attempts == 1
+    assert strips == []
+    assert forced_compactions == []
+    assert coordinator.statuses["root"] == "failed"
