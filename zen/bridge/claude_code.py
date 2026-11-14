@@ -45,21 +45,28 @@ Then point Zen at it:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
 import hashlib
 import json
 import logging
 import os
 import queue
+import shutil
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Final
 import tempfile
 
 from zen.bridge.errors import ERROR_DETAIL_MAX_CHARS, BaseBridgeError, scrub
+
+
+if TYPE_CHECKING:
+    from claude_agent_sdk import HookContext, HookJSONOutput
 
 
 logger = logging.getLogger(__name__)
@@ -76,6 +83,30 @@ _SESSION_IDLE_TIMEOUT_S = float(os.environ.get("ZEN_BRIDGE_IDLE_TIMEOUT_S", "540
 _TURN_TIMEOUT_S = float(os.environ.get("ZEN_BRIDGE_TURN_TIMEOUT_S", "1800"))
 _MCP_SERVER_NAME = "zen"
 _MCP_PREFIX = f"mcp__{_MCP_SERVER_NAME}__"
+
+# The model behind a session is given zen's tools and nothing else. Left to
+# itself Claude Code brings its operator's whole setup along: settings,
+# instruction files and the memory index of the directory it runs in, every MCP
+# server the operator has configured, the account's connectors, plugins and
+# skills. Each option the session is started with shuts one of those out, and
+# none is trusted on its own: the session's own account of what it holds is read
+# before any turn is answered (`_report_findings`), and a call to anything that
+# is not one of zen's tools is refused when it is made (`_Session._gate`).
+_PERMISSION_MODE: Final = "dontAsk"  # a call that is not pre-approved is refused, not run
+_ISOLATION_ENV = {
+    # The instruction-file block. It is also what carries the memory index.
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+    # The memory index itself, which the settings sources do not govern.
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    # The connectors of the signed-in account.
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+}
+# Answered when a session holds, or is asked to use, anything but zen's tools.
+# Asking again cannot change that, so the status is one zen does not retry.
+_REFUSAL_STATUS = 403
+_REFUSAL_CODE = "session_not_isolated"
+_HOME: list[str] = []
+_HOME_LOCK = threading.Lock()
 
 # Effort levels the Agent SDK accepts. Note ``max`` sits above ``xhigh`` and has
 # no equivalent in zen's own scale -- zen mirrors the OpenAI SDK's
@@ -455,6 +486,8 @@ class _Turn:
     # failure has no upstream status and is answered as a 502.
     status: int = 0
     code: str = ""
+    # Whose refusal a status-bearing error is: the upstream's, or the bridge's own.
+    error_type: str = "upstream_error"
     # Token usage for the Agent SDK query cycle that just ended. Populated
     # only on the ``kind="text"`` turn that closes a cycle; tool-call turns
     # within the same cycle carry zeros because the SDK reports usage once
@@ -545,6 +578,56 @@ def _sign_in_failure(result: Any, error_kind: str | None, text: str) -> _Turn | 
     )
 
 
+def _remove_home(home: str) -> None:
+    shutil.rmtree(home, ignore_errors=True)
+
+
+def _session_home() -> str:
+    """The directory every session runs in: empty, private, and this process's own.
+
+    Claude Code ties project state to its working directory -- instruction
+    files, the memory index, the repository's status. Run from the operator's
+    checkout, a session is handed all three.
+    """
+    with _HOME_LOCK:
+        if not _HOME or not Path(_HOME[0]).is_dir():
+            _HOME[:] = [tempfile.mkdtemp(prefix="zen_bridge_")]
+            # serve() removes it on the way out; this covers every other exit.
+            atexit.register(_remove_home, _HOME[0])
+        return _HOME[0]
+
+
+def _report_findings(report: dict[str, Any], tool_names: frozenset[str], home: str) -> list[str]:
+    """What Claude Code's own account of a session holds besides zen's tools.
+
+    The account is the ``init`` message a session sends when it starts work: its
+    tools, its MCP servers, its plugins, skills and slash commands, the directory
+    it runs in and its permission mode. An empty answer means the session is what
+    was asked for.
+    """
+    found: list[str] = []
+    extra = {str(name) for name in report.get("tools") or []} - tool_names
+    if extra:
+        found.append(f"tools {sorted(extra)}")
+    servers = sorted(
+        str(server.get("name")) if isinstance(server, dict) else str(server)
+        for server in report.get("mcp_servers") or []
+    )
+    if servers != [_MCP_SERVER_NAME]:
+        found.append(f"MCP servers {servers}")
+    found.extend(
+        f"{part} {report[part]}"
+        for part in ("plugins", "skills", "slash_commands")
+        if report.get(part)
+    )
+    if report.get("permissionMode") != _PERMISSION_MODE:
+        found.append(f"permission mode {report.get('permissionMode')!r}")
+    where = report.get("cwd")
+    if not where or Path(str(where)).resolve() != Path(home).resolve():
+        found.append(f"working directory {where!r}")
+    return found
+
+
 class _Session:
     """One long-lived Agent SDK conversation, owned by a dedicated thread.
 
@@ -572,6 +655,15 @@ class _Session:
         self._lock = threading.Lock()
         self._closed = False
         self._drop_sink = _ImageDropSink(session_label=model[:40] or "unknown")
+        self._tool_names = frozenset(
+            f"{_MCP_PREFIX}{name}"
+            for name in ((t.get("function") or {}).get("name") for t in tools)
+            if name
+        )
+        # Whether Claude Code's account of this session has been read and found
+        # to hold only zen's tools, and what was found or called if not.
+        self._cleared = False
+        self._breach = ""
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -633,12 +725,17 @@ class _Session:
                 len(calls),
                 [c["name"] for c in calls],
             )
-            self._events.put(_Turn(kind="tool", calls=calls))
+            self._events.put(self._vetted(_Turn(kind="tool", calls=calls)))
 
     async def _connect(
         self, system_prompt: str, tools: list[dict[str, Any]], effort: str | None
     ) -> Any:
-        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server
+        from claude_agent_sdk import (
+            ClaudeAgentOptions,
+            ClaudeSDKClient,
+            HookMatcher,
+            create_sdk_mcp_server,
+        )
 
         sdk_tools = [self._make_tool(t) for t in tools if (t.get("function") or {}).get("name")]
         server = create_sdk_mcp_server(name=_MCP_SERVER_NAME, version="1.1.1", tools=sdk_tools)
@@ -660,10 +757,16 @@ class _Session:
             model=self.model,  # pass-through; nothing pinned
             system_prompt=sp_option,
             mcp_servers={_MCP_SERVER_NAME: server},
-            allowed_tools=[f"{_MCP_PREFIX}{(t.get('function') or {}).get('name')}" for t in tools],
-            tools=["websearch"],  # suppress Claude Code's own built-ins; Zen supplies the toolset
-            setting_sources=None,  # ignore the user's project/user settings
-            permission_mode="bypassPermissions",
+            strict_mcp_config=True,  # that server and no other
+            allowed_tools=sorted(self._tool_names),
+            tools=[],  # no built-in tool: zen supplies the toolset
+            skills=[],  # none is offered to the model
+            extra_args={"disable-slash-commands": None},  # no skill, no slash command
+            setting_sources=[],  # no user, project or local settings; None would load them all
+            permission_mode=_PERMISSION_MODE,
+            hooks={"PreToolUse": [HookMatcher(hooks=[self._gate])]},
+            cwd=_session_home(),
+            env=dict(_ISOLATION_ENV),
             include_partial_messages=False,
             effort=effort,  # None -> SDK default
         )
@@ -673,7 +776,7 @@ class _Session:
 
     async def _drain(self) -> None:
         """Consume one model turn, emitting a terminal event when it ends."""
-        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+        from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
 
         text: list[str] = []
         usage: tuple[int, int, int, int] = (0, 0, 0, 0)
@@ -681,7 +784,10 @@ class _Session:
         result: Any = None
         try:
             async for msg in self._client.receive_response():
-                if isinstance(msg, AssistantMessage):
+                if isinstance(msg, SystemMessage):
+                    if msg.subtype == "init" and not self._read_report(msg.data):
+                        return
+                elif isinstance(msg, AssistantMessage):
                     error_kind = getattr(msg, "error", None) or error_kind
                     text.extend(
                         block.text
@@ -706,15 +812,82 @@ class _Session:
         if not parked:
             prompt_tokens, completion_tokens, cached_tokens, total_tokens = usage
             self._events.put(
-                _Turn(
-                    kind="text",
-                    text="".join(text).strip(),
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    cached_tokens=cached_tokens,
-                    total_tokens=total_tokens,
+                self._vetted(
+                    _Turn(
+                        kind="text",
+                        text="".join(text).strip(),
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        cached_tokens=cached_tokens,
+                        total_tokens=total_tokens,
+                    )
                 )
             )
+
+    async def _gate(
+        self, hook_input: Any, _tool_use_id: str | None, _context: HookContext
+    ) -> HookJSONOutput:
+        """Refuse a call to anything that is not one of this session's own tools.
+
+        Claude Code asks before every tool call, whatever its permission mode.
+        Nothing but zen's tools should be there to call; if something is, the
+        call is refused and the session answers no further turn.
+        """
+        name = str((hook_input or {}).get("tool_name") or "")
+        if name in self._tool_names:
+            return {}
+        self._breach = f"a call to {name[:200] or 'an unnamed tool'}"
+        logger.error("bridge refused %s: not one of zen's tools", self._breach)
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "Only zen's own tools may be called here.",
+            }
+        }
+
+    def _read_report(self, report: dict[str, Any]) -> bool:
+        """Read Claude Code's account of the session; False if it holds more than zen's tools."""
+        found = _report_findings(report, self._tool_names, _session_home())
+        if found:
+            self._breach = "Claude Code reports " + "; ".join(found)
+            logger.error("bridge session refused: %s", self._breach)
+            self._events.put(self._refusal(self._breach))
+            return False
+        self._cleared = True
+        logger.info(
+            "bridge session holds only zen's tools: tools %s, MCP servers %s, "
+            "directory %s, mode %s",
+            sorted(str(name) for name in report.get("tools") or []),
+            [_MCP_SERVER_NAME],
+            report.get("cwd"),
+            report.get("permissionMode"),
+        )
+        return True
+
+    def _refusal(self, found: str) -> _Turn:
+        return _Turn(
+            kind="error",
+            error=f"the bridge will not serve this session: {found}",
+            status=_REFUSAL_STATUS,
+            code=_REFUSAL_CODE,
+            error_type="bridge_error",
+        )
+
+    def _vetted(self, turn: _Turn) -> _Turn:
+        """The turn as it may be answered.
+
+        A reply is passed on only from a session whose own account of itself has
+        been read and holds nothing but zen's tools, and in which nothing else
+        has been called since.
+        """
+        if turn.kind == "error":
+            return turn
+        if self._breach:
+            return self._refusal(self._breach)
+        if not self._cleared:
+            return self._refusal("Claude Code did not report what the session holds")
+        return turn
 
     # -- public API --
 
@@ -939,7 +1112,7 @@ def handle_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
             raise BridgeError(
                 turn.error,
                 status=turn.status,
-                error_type="upstream_error",
+                error_type=turn.error_type,
                 code=turn.code or None,
             )
         raise BridgeError(turn.error)
@@ -1039,4 +1212,8 @@ def serve(host: str = "127.0.0.1", port: int = 8787) -> None:
         pass
     finally:
         _POOL.close_all()
+        with _HOME_LOCK:
+            for home in _HOME:
+                shutil.rmtree(home, ignore_errors=True)
+            _HOME.clear()
         httpd.server_close()

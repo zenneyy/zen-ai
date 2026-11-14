@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import claude_agent_sdk
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, ResultMessage, SystemMessage, TextBlock
 from openai import (
     APIStatusError,
     AuthenticationError,
@@ -53,11 +53,27 @@ class _FakeSdkClient:
         failure = type(self).failure
         if failure is not None:
             raise failure
+        yield _session_report(self.options)
         for message in type(self).script:
             yield message
 
     async def disconnect(self) -> None:
         """Nothing to stop."""
+
+
+def _session_report(options: Any) -> SystemMessage:
+    """The account Claude Code gives of a session that holds what the bridge asked for."""
+    return SystemMessage(
+        subtype="init",
+        data={
+            "tools": list(options.allowed_tools),
+            "mcp_servers": [{"name": name, "status": "connected"} for name in options.mcp_servers],
+            "plugins": [],
+            "skills": [],
+            "cwd": options.cwd,
+            "permissionMode": options.permission_mode,
+        },
+    )
 
 
 @pytest.fixture
