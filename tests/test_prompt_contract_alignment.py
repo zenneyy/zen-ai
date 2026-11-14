@@ -42,7 +42,11 @@ from zen.agents.prompt import render_system_prompt
 from zen.skills import _INTERNAL_SKILL_CATEGORIES, validate_requested_skills
 from zen.tools.agents_graph.contracts import HuntBasis, HuntTask
 from zen.tools.coverage.tools import record_coverage
-from zen.tools.finish.tool import finish_scan
+from zen.tools.finish.tool import (
+    COVERAGE_GATE_DESCRIPTION,
+    COVERAGE_GATE_DISPOSAL_EXAMPLE,
+    finish_scan,
+)
 from zen.tools.threat_model.implied_classes import IMPLIED_CLASS_GATE_DESCRIPTION
 from zen.tools.threat_model.schema import (
     DISMISSAL_LINE_EXAMPLE,
@@ -239,3 +243,19 @@ def test_method_slugs_validate_or_are_framework_injected(var: str) -> None:
 def test_unknown_role_is_surfaced_not_silently_empty() -> None:
     with pytest.raises(UnknownRoleError):
         render_contract("validator")
+
+
+def test_root_contract_names_the_coverage_gate() -> None:
+    """Root owns ``finish_scan``, so its CONTRACT teaches the coverage gate from the
+    same description and disposal grammar the gate's rejection uses."""
+    contract = render_contract("root")
+    assert "coverage gate" in contract
+    assert COVERAGE_GATE_DESCRIPTION in contract
+    assert COVERAGE_GATE_DISPOSAL_EXAMPLE in contract
+
+
+def test_finish_scan_description_teaches_the_coverage_gate_from_its_single_source() -> None:
+    description = finish_scan.description
+    assert COVERAGE_GATE_DESCRIPTION in description
+    assert COVERAGE_GATE_DISPOSAL_EXAMPLE in description
+    assert "{coverage_gate}" not in description

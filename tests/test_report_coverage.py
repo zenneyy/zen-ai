@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from zen.report.coverage import (
     _SKILL_PHRASINGS,
     build_coverage_document,
     read_agent_graph,
+    unrecorded_hunt_classes,
     write_coverage,
 )
 from zen.skills import get_available_skills
@@ -262,3 +265,102 @@ def test_a_root_that_worked_alone_is_held_to_the_rule() -> None:
 
     silent = [gap for gap in doc["gaps"] if gap["kind"] == "agent_recorded_no_coverage"]
     assert [gap["agent_name"] for gap in silent] == ["Root Agent"]
+
+
+def test_a_runtime_recorded_row_keeps_its_provenance() -> None:
+    doc = _document(
+        entries=[_entry(source="runtime", agent_name="system", outcome="needs_follow_up")]
+    )
+
+    assert doc["entries"][0]["source"] == "runtime"
+    assert doc["entries"][0]["recorded_by"] == "system"
+
+
+def _typed_hunter_graph(status: str = "crashed", **meta: Any) -> dict[str, Any]:
+    return {
+        "statuses": {"h1": status},
+        "names": {"h1": "Deserialization hunter"},
+        "metadata": {"h1": {"role": "hunter", "hunt_class": "rce", "skills": [], **meta}},
+    }
+
+
+def test_a_typed_hunter_with_no_hunt_report_leaves_its_class_unrecorded() -> None:
+    assert unrecorded_hunt_classes([], _typed_hunter_graph()) == [
+        {
+            "vuln_class": "rce",
+            "hunters": [
+                {"agent_id": "h1", "agent_name": "Deserialization hunter", "status": "crashed"}
+            ],
+            "closed_rows": [],
+        }
+    ]
+    assert unrecorded_hunt_classes([], _typed_hunter_graph(hunt_report={"open_items": []})) == []
+
+
+def test_a_hunters_own_closure_does_not_record_its_class_without_a_hunt_report() -> None:
+    own = _entry(entry_id="e1", risk_area="RCE", agent_id="h1", agent_name="Deserialization hunter")
+
+    gaps = unrecorded_hunt_classes([own], _typed_hunter_graph())
+
+    assert [gap["vuln_class"] for gap in gaps] == ["rce"]
+    # The row stands as its partial account and is named, so the duplicate is seen coming.
+    assert gaps[0]["closed_rows"] == [
+        {
+            "entry_id": "e1",
+            "surface": "POST /api/orders/{id}",
+            "outcome": "no_issue_found",
+            "recorded_by": "Deserialization hunter",
+        }
+    ]
+
+
+def test_an_open_row_must_name_the_class_as_whole_words() -> None:
+    """The slug inside a longer word is not the class; substring matching accepted it."""
+    inside_a_word = _entry(risk_area="exposed resources", outcome="needs_follow_up")
+    assert unrecorded_hunt_classes([inside_a_word], _typed_hunter_graph()) != []
+
+    named = _entry(risk_area="RCE", outcome="needs_follow_up")
+    assert unrecorded_hunt_classes([named], _typed_hunter_graph()) == []
+
+
+def _traversal_graph() -> dict[str, Any]:
+    graph = _typed_hunter_graph()
+    graph["metadata"]["h1"]["hunt_class"] = "path_traversal_lfi_rfi"
+    return graph
+
+
+@pytest.mark.parametrize(
+    ("risk_area", "records"),
+    [
+        ("path_traversal_lfi_rfi", True),  # the raw slug, as the rejection hands it out
+        ("Path Traversal LFI RFI", True),  # the same words, spaced
+        ("Path Traversal", False),  # a partial overlap is a different, looser claim
+        ("path traversal lfi", False),
+        ("lfi rfi path traversal", False),  # the words out of order are not the slug
+    ],
+)
+def test_a_multi_word_class_is_recorded_only_by_its_whole_slug(
+    risk_area: str, records: bool
+) -> None:
+    row = _entry(risk_area=risk_area, outcome="needs_follow_up")
+
+    assert (unrecorded_hunt_classes([row], _traversal_graph()) == []) is records
+
+
+def test_one_open_row_naming_several_classes_records_each_of_them() -> None:
+    graph = {
+        "statuses": {"h1": "crashed", "h2": "stopped"},
+        "names": {"h1": "Request forgery hunter", "h2": "Redirect hunter"},
+        "metadata": {
+            "h1": {"role": "hunter", "hunt_class": "ssrf", "skills": []},
+            "h2": {"role": "hunter", "hunt_class": "open_redirect", "skills": []},
+        },
+    }
+    assert [gap["vuln_class"] for gap in unrecorded_hunt_classes([], graph)] == [
+        "open_redirect",
+        "ssrf",
+    ]
+
+    row = _entry(risk_area="SSRF / open redirect", outcome="needs_follow_up")
+
+    assert unrecorded_hunt_classes([row], graph) == []

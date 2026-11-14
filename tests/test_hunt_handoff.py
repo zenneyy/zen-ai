@@ -10,7 +10,7 @@ path, so existing callers are unaffected.
 from __future__ import annotations
 
 import json
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agents.tool_context import ToolContext
@@ -19,6 +19,10 @@ from zen.core.agents import AgentCoordinator
 from zen.report.state import set_global_report_state
 from zen.tools.agents_graph.contracts import HuntReport, HuntScope, HuntTask
 from zen.tools.agents_graph.tools import agent_finish, create_agent
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _hunt_task_json(**overrides: Any) -> str:
@@ -208,3 +212,62 @@ async def test_hunter_finish_with_invalid_report_is_rejected() -> None:
     assert result["success"] is False
     assert "invalid hunt_report" in result["error"]
     assert coordinator.statuses["child"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_typed_hunt_class_is_kept_on_the_agent_without_changing_the_spawn(
+    tmp_path: Path,
+) -> None:
+    coordinator = AgentCoordinator()
+    coordinator.set_snapshot_path(tmp_path / "agents.json")
+    await coordinator.register("root", "zen", parent_id=None)
+    captured: dict[str, Any] = {}
+
+    async def _fake_spawner(**kwargs: Any) -> dict[str, Any]:
+        captured.clear()
+        captured.update(kwargs)
+        await coordinator.register("child001", kwargs["name"], "root", role=kwargs["role"])
+        return {"success": True, "agent_id": "child001"}
+
+    async def _spawn_child(**payload: Any) -> None:
+        ctx = ToolContext(
+            context={
+                "coordinator": coordinator,
+                "agent_id": "root",
+                "spawn_child_agent": _fake_spawner,
+            },
+            tool_name=create_agent.name,
+            tool_call_id="call-1",
+            tool_arguments="{}",
+        )
+        base = {"name": "Probe", "task": "work the surface"}
+        await create_agent.on_invoke_tool(ctx, json.dumps({**base, **payload}))
+
+    await _spawn_child(role="hunter", hunt_task=_hunt_task_json())
+
+    # The spawn itself is untouched: the spawner gets exactly the arguments it got
+    # before, and nothing new rides in the context the child inherits.
+    assert set(captured) == {
+        "parent_ctx",
+        "name",
+        "task",
+        "skills",
+        "parent_history",
+        "role",
+        "hunt_task_block",
+    }
+    assert "hunt_class" not in captured["parent_ctx"]
+    assert "Vulnerability class (exactly one): xss" in captured["hunt_task_block"]
+
+    # The class is on the agent, on disk by the time create_agent returns, and
+    # comes back on resume the same way a hunt report does.
+    assert coordinator.metadata["child001"]["hunt_class"] == "xss"
+    snapshot = json.loads((tmp_path / "agents.json").read_text(encoding="utf-8"))
+    assert snapshot["metadata"]["child001"]["hunt_class"] == "xss"
+    restored = AgentCoordinator()
+    await restored.restore(snapshot)
+    assert restored.metadata["child001"]["hunt_class"] == "xss"
+
+    # An untyped hunter has no structural class, so none is invented for it.
+    await _spawn_child(role="hunter")
+    assert "hunt_class" not in coordinator.metadata["child001"]

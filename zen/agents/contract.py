@@ -31,7 +31,11 @@ from typing import TYPE_CHECKING, get_args
 from zen.tools.agents_graph.contracts import HuntReport, HuntTask, ImpactRung
 from zen.tools.agents_graph.tools import AgentRole, agent_finish, create_agent
 from zen.tools.coverage.tools import list_coverage, record_coverage
-from zen.tools.finish.tool import finish_scan
+from zen.tools.finish.tool import (
+    COVERAGE_GATE_DESCRIPTION,
+    COVERAGE_GATE_DISPOSAL_EXAMPLE,
+    finish_scan,
+)
 from zen.tools.hunt_topology.chains import (
     CONFIRMED_ADVANCEMENT_DESCRIPTION,
     DECOMPOSITION_GATE_DESCRIPTION,
@@ -401,6 +405,15 @@ def _root_requirements() -> list[ContractRequirement]:
                 f"left open or blocked with no recorded disposition. {DISPOSITION_CONVENTION} "
                 "Resolve each open/blocked lead to a terminal state, give it an inline disposition "
                 f"(`{DISPOSITION_LINE_EXAMPLE}`), or defer it, before you finish."
+            ),
+        ),
+        ContractRequirement(
+            key="coverage gate",
+            group="gates",
+            text=(
+                "The coverage gate on `finish_scan` refuses while a vulnerability class you "
+                f"assigned has no record. {COVERAGE_GATE_DESCRIPTION} Record an open class "
+                f"with `{COVERAGE_GATE_DISPOSAL_EXAMPLE}`."
             ),
         ),
         ContractRequirement(

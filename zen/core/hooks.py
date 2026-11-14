@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 
 LLM_TURN_KEY = "llm_turn"
 
+# Set on an agent's run context while the last warning stage ("finish
+# immediately") is in force for it, naming the limit that triggered it. Cleared
+# and recomputed before every model call, so it always describes the call whose
+# tool calls are now executing. ``finish_scan`` reads it to recognise a forced
+# wind-down.
+FINAL_STAGE_KEY = "final_warning_stage"
+
 _STAGE_LABELS: tuple[str, ...] = ("NOTICE", "URGENT", "CRITICAL")
 _TURN_WARN_BANDS: tuple[float, ...] = (0.70, 0.85, 0.95)
 _ROOT_BUDGET_WARN_BANDS: tuple[float, ...] = (0.70, 0.85, 0.95)
@@ -147,6 +154,7 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         input_items: list[TResponseInputItem],
     ) -> None:
         context.context[LLM_TURN_KEY] = int(context.context.get(LLM_TURN_KEY, 0)) + 1
+        context.context.pop(FINAL_STAGE_KEY, None)
         try:
             self._maybe_warn_turns(context, input_items)
             self._maybe_warn_budget(context, input_items)
@@ -168,6 +176,8 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         stage = _crossed_stage(turns_used / self._max_turns, _TURN_WARN_BANDS)
         if stage is None:
             return
+        if stage == len(_STAGE_LABELS) - 1:
+            context.context[FINAL_STAGE_KEY] = "turn budget"
         remaining = max(self._max_turns - turns_used, 0)
         pct = round(100 * turns_used / self._max_turns)
         content = (
@@ -196,6 +206,8 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         stage = _crossed_stage(cost / self._max_budget_usd, bands)
         if stage is None:
             return
+        if stage == len(_STAGE_LABELS) - 1:
+            context.context[FINAL_STAGE_KEY] = "cost budget"
         pct = round(100 * cost / self._max_budget_usd)
         reserve_pct = round(_SUBAGENT_BUDGET_RESERVE * 100)
         if self._interactive:

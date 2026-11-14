@@ -831,6 +831,7 @@ async def create_agent(  # noqa: PLR0911
     # Typed hunt handoff: a hunter's structured contract rides alongside the
     # free-text task; every other role keeps the free-text path untouched.
     hunt_task_block: str | None = None
+    hunt_class: str | None = None
     if hunt_task is not None and str(hunt_task).strip():
         if role != "hunter":
             return json.dumps(
@@ -860,6 +861,7 @@ async def create_agent(  # noqa: PLR0911
                 default=str,
             )
         hunt_task_block = parsed_task.render_block()
+        hunt_class = parsed_task.vuln_class
 
     parent_history = list(ctx.turn_input) if inherit_context and ctx.turn_input else []
     try:
@@ -879,6 +881,14 @@ async def create_agent(  # noqa: PLR0911
             ensure_ascii=False,
             default=str,
         )
+
+    # The typed class is the one structural record of what this hunter was
+    # assigned — the skills it carries are background, not an assignment — so it
+    # is kept on the agent for the finish-time coverage gate to read.
+    child_id = result.get("agent_id")
+    if hunt_class is not None and isinstance(child_id, str) and child_id:
+        await coordinator.update_metadata(child_id, hunt_class=hunt_class)
+        await coordinator._maybe_snapshot()
 
     logger.info(
         "create_agent: spawned %s (%s) parent=%s role=%s skills=%d requested=%s "

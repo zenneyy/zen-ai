@@ -242,6 +242,7 @@ def _record_impl(
     agent_id: str | None,
     agent_name: str | None,
     approaches_tried: list[str] | None = None,
+    source: str | None = None,
 ) -> dict[str, Any]:
     normalized, errors = _validate(
         surface=surface, risk_area=risk_area, outcome=outcome, evidence=evidence,
@@ -265,6 +266,10 @@ def _record_impl(
         entry["agent_id"] = agent_id
     if agent_name:
         entry["agent_name"] = agent_name
+    if source:
+        # Provenance for a row the runtime wrote itself. Rows recorded through the
+        # tool never carry it, so an agent cannot claim machine provenance.
+        entry["source"] = source
 
     with _coverage_lock:
         duplicate = _duplicate_of_locked(surface, risk_area)
@@ -347,6 +352,10 @@ def _update_impl(
             superseded["approaches_tried"] = existing["approaches_tried"]
         if existing.get("agent_name"):
             superseded["agent_name"] = existing["agent_name"]
+        if existing.get("source"):
+            # A row stops being the runtime's own statement the moment an agent
+            # revises it; the history keeps that it started as one.
+            superseded["source"] = existing.pop("source")
         history = existing.get("history")
         existing["history"] = [*history, superseded] if isinstance(history, list) else [superseded]
 

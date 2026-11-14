@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agents import RunContextWrapper, function_tool
 
 from zen.core.agents import coordinator_from_context
+
+
+if TYPE_CHECKING:
+    from zen.core.agents import AgentCoordinator
 
 
 logger = logging.getLogger(__name__)
@@ -19,6 +23,45 @@ logger = logging.getLogger(__name__)
 # must carry a recorded disposition before the scan can finish; ``testing`` is in
 # progress (being handled), and ``confirmed``/``refuted`` are already terminal.
 _OPEN_HYPOTHESIS_STATES = frozenset({"open", "blocked"})
+
+
+# ── coverage gate: its teaching text, defined once ───────────────────────────
+#
+# The ``finish_scan`` description, the generated root CONTRACT, and the gate's own
+# rejection all read these constants, so the text that teaches and the gate that
+# enforces cannot drift.
+
+COVERAGE_GATE_DISPOSAL_EXAMPLE = (
+    'record_coverage(surface="<the surface that hunter was assigned>", '
+    'risk_area="<vuln_class>", outcome="needs_follow_up", '
+    'evidence="<why it was not examined>")'
+)
+"""The disposal grammar, shown verbatim wherever the coverage gate is taught."""
+
+COVERAGE_GATE_DESCRIPTION = (
+    "Every vulnerability class you assigned to a hunter through a typed `hunt_task` must have "
+    "an explicit record before the scan finishes: the hunt report of a hunter assigned that "
+    "class, or an open coverage entry that names the class. A hunter that crashed, stalled, or "
+    "was stopped before `agent_finish` filed no hunt report; the rows it recorded and the "
+    "reports it filed on the way stand as a partial account and do not record the class. "
+    "Either have the class examined — dispatch a hunter for it again — or record it as open: "
+    "outcome `needs_follow_up`, the class slug in `risk_area`, the reason in `evidence`. This "
+    "gate asks for a record, never for a closure: `needs_follow_up` is a legitimate final "
+    "outcome, and recording an unexamined class as `no_issue_found`, `ruled_out`, or "
+    "`not_applicable` does not satisfy it. If `record_coverage` refuses the open row as a "
+    "duplicate, do not overwrite another agent's real review: record it under a more specific "
+    "surface, and use `update_coverage` only to reopen a closure that was itself written for "
+    "the unexamined assignment. When no user is attached and the runtime tells you to finish "
+    "immediately, call `finish_scan` without recording the rest: the runtime records what is "
+    "still unrecorded, as unexamined, under its own name."
+)
+"""One class-agnostic statement of the coverage gate."""
+
+_COVERAGE_GATE_MARKER = "{coverage_gate}"
+_COVERAGE_GATE_TEACHING = (
+    f"{COVERAGE_GATE_DESCRIPTION} Record an open class with `{COVERAGE_GATE_DISPOSAL_EXAMPLE}`."
+)
+_SYSTEM_RECORDER = "system"
 
 
 def _undisposed_open_hypotheses(content: str) -> list[str]:
@@ -115,7 +158,113 @@ def _undisposed_hypotheses_across_run() -> list[str]:
     return ordered
 
 
-def _do_finish(
+def _unrecorded_classes(agent_graph: dict[str, Any]) -> list[dict[str, Any]]:
+    """The coverage gate's evaluation: typed hunt classes left with no record.
+
+    Read-only, so a rejected finish changes nothing and can be retried or resumed
+    freely. A failure in here must never decide whether a scan can finish: it is
+    logged and treated as nothing to block on, and the advisory summary still
+    reports what it can see. A real gap never takes that path — it is a value
+    this function returns, not an exception it raises.
+    """
+    try:
+        from zen.report.coverage import unrecorded_hunt_classes
+        from zen.tools.coverage.tools import get_coverage_entries
+
+        unrecorded = unrecorded_hunt_classes(get_coverage_entries(), agent_graph)
+    except Exception:
+        logger.exception("coverage gate evaluation failed; finishing on the advisory summary")
+        return []
+    return unrecorded
+
+
+def _hunters_label(gap: dict[str, Any]) -> str:
+    return ", ".join(f"{hunter['agent_name']} [{hunter['status']}]" for hunter in gap["hunters"])
+
+
+def _closed_rows_label(gap: dict[str, Any]) -> str:
+    """Rows that already name the class but closed it, so the duplicate is seen coming."""
+    rows = gap.get("closed_rows") or []
+    if not rows:
+        return ""
+    listed = ", ".join(
+        f"{row['entry_id']} '{row['surface']}' as {row['outcome']} by {row['recorded_by']}"
+        for row in rows
+    )
+    return f"; already recorded but closed: {listed}"
+
+
+def _coverage_gate_error(unrecorded: list[dict[str, Any]]) -> str:
+    """The rejection text: every unrecorded class at once, with how to record it."""
+    named = "; ".join(
+        f"{gap['vuln_class']} (assigned to {_hunters_label(gap)}{_closed_rows_label(gap)})"
+        for gap in unrecorded
+    )
+    return (
+        "Coverage gate: the scan cannot finish while these assigned vulnerability classes have "
+        f"no record: {named}. {_COVERAGE_GATE_TEACHING} A class is accounted for, never "
+        "shipped silently."
+    )
+
+
+def _coverage_rejection(blocking: list[dict[str, Any]], *, error_key: str) -> dict[str, Any]:
+    """The coverage half of a rejection; empty when no class blocks."""
+    if not blocking:
+        return {}
+    return {
+        error_key: _coverage_gate_error(blocking),
+        "unrecorded_classes": [gap["vuln_class"] for gap in blocking],
+    }
+
+
+def _record_unexamined(unrecorded: list[dict[str, Any]], wind_down: str | None) -> list[str]:
+    """Record each unrecorded class as open, attributed to the runtime.
+
+    Only in a forced wind-down, where a rejection would spend the turns the final
+    report needs. The runtime writes the row the root agent would have been asked
+    for — open, never closed — so the class is published as unexamined under the
+    runtime's own name rather than shipping silently or costing the scan its
+    report. Best-effort: a row that cannot be written is logged and the scan
+    still finalizes.
+    """
+    recorded: list[str] = []
+    if not unrecorded or not wind_down:
+        return recorded
+    try:
+        from zen.tools.coverage.tools import _record_impl
+
+        for gap in unrecorded:
+            vuln_class = str(gap["vuln_class"])
+            holders = ", ".join(str(hunter["agent_name"]) for hunter in gap["hunters"])
+            outcome = _record_impl(
+                surface=f"Assignment of {holders}",
+                risk_area=vuln_class,
+                outcome="needs_follow_up",
+                evidence=(
+                    f"Recorded by the runtime at finish because {wind_down}: the hunter "
+                    f"assigned this class ({_hunters_label(gap)}) ended without filing its "
+                    "hunt report. Any coverage entries or reports it recorded before stopping "
+                    "stand as a partial account; the rest of the assignment is unexamined — "
+                    "not assessed as clean."
+                ),
+                agent_id=None,
+                agent_name=_SYSTEM_RECORDER,
+                source="runtime",
+            )
+            if outcome.get("success"):
+                recorded.append(vuln_class)
+            else:
+                logger.warning(
+                    "unexamined class %s was not recorded at finish: %s",
+                    vuln_class,
+                    outcome.get("error"),
+                )
+    except Exception:
+        logger.exception("could not record unexamined classes at finish; finalizing anyway")
+    return recorded
+
+
+def _do_finish(  # noqa: PLR0911
     *,
     parent_id: str | None,
     executive_summary: str,
@@ -123,6 +272,7 @@ def _do_finish(
     technical_analysis: str,
     recommendations: str,
     agent_graph: dict[str, Any],
+    wind_down: str | None = None,
 ) -> dict[str, Any]:
     if parent_id is not None:
         return {
@@ -151,6 +301,13 @@ def _do_finish(
     # anything else blocks finishing, so a dropped lead is structurally impossible
     # to leave unrecorded.
     undisposed = _undisposed_hypotheses_across_run()
+    # Coverage gate, evaluated here — before anything is persisted or marked
+    # complete — so a class nobody accounted for is still something the root agent
+    # can act on, not a warning attached to a scan that has already ended. In a
+    # forced wind-down it does not block: the runtime records the class itself
+    # further down, because a rejected finish there can cost the scan its report.
+    unrecorded = _unrecorded_classes(agent_graph)
+    blocking: list[dict[str, Any]] = [] if wind_down else unrecorded
     if undisposed:
         from zen.tools.threat_model.schema import (
             DEFERRAL_LINE_EXAMPLE,
@@ -158,7 +315,7 @@ def _do_finish(
         )
 
         logger.debug("finish_scan rejected — undisposed open/blocked hypotheses: %s", undisposed)
-        return {
+        rejection: dict[str, Any] = {
             "success": False,
             "scan_completed": False,
             "error": (
@@ -172,6 +329,21 @@ def _do_finish(
             ),
             "undisposed_hypotheses": undisposed,
         }
+        # One rejection names both problems, so both are fixable in one turn.
+        rejection.update(_coverage_rejection(blocking, error_key="coverage_error"))
+        return rejection
+    if blocking:
+        logger.debug("finish_scan rejected — unrecorded hunt classes: %s", blocking)
+        return {
+            "success": False,
+            "scan_completed": False,
+            **_coverage_rejection(blocking, error_key="error"),
+        }
+
+    # Nothing blocks. Everything coverage-related is settled before the first
+    # persistence side effect, and none of it can fail the finish.
+    system_recorded = _record_unexamined(unrecorded, wind_down)
+    coverage_summary = _advisory_coverage_summary(agent_graph, system_recorded)
 
     try:
         from zen.report.state import get_global_report_state
@@ -192,7 +364,6 @@ def _do_finish(
             recommendations=recommendations.strip(),
         )
         vuln_count = len(report_state.vulnerability_reports)
-        coverage_summary = _coverage_summary(agent_graph)
     except (ImportError, AttributeError) as e:
         logger.exception("finish_scan persistence failed")
         return {"success": False, "error": f"Failed to complete scan: {e!s}"}
@@ -211,15 +382,29 @@ def _do_finish(
         return result
 
 
-def _coverage_summary(agent_graph: dict[str, Any]) -> dict[str, Any]:
-    """Coverage counts, unresolved surfaces, and gaps the runtime can see.
+def _advisory_coverage_summary(
+    agent_graph: dict[str, Any], system_recorded: list[str]
+) -> dict[str, Any]:
+    """The advisory summary, computed before persistence and never fatal to it."""
+    try:
+        summary = _coverage_summary(agent_graph)
+    except Exception:
+        logger.exception("coverage summary failed; finishing without it")
+        summary = {}
+    if system_recorded:
+        summary["system_recorded_unexamined"] = system_recorded
+    return summary
 
-    The gap list is derived from the agent graph rather than from the ledger,
-    so it catches the failure the ledger cannot: a risk class an agent was
-    equipped for and never accounted for. Surfacing it here — in the response
-    to the call that ends the scan — is the last point at which the root agent
-    can still dispatch work or record the class as unresolved instead of
-    letting the report imply it was clean.
+
+def _coverage_summary(agent_graph: dict[str, Any]) -> dict[str, Any]:
+    """Advisory coverage counts, unresolved surfaces, and gaps the runtime can see.
+
+    The gap list here is derived from the skills agents carried, matched to
+    ledger rows by wording. That reading is deliberately loose — a carried skill
+    is not an assignment, and wording is not attribution — so it informs the
+    response and the published record but never decides whether the scan may
+    finish. The check that does is the coverage gate in :func:`_do_finish`,
+    which reads only typed assignments and recorder identity.
     """
     from zen.report.coverage import agents_from_graph, skill_coverage_gaps
     from zen.tools.coverage.tools import get_coverage_entries, outcome_counts
@@ -261,6 +446,29 @@ def _coverage_summary(agent_graph: dict[str, Any]) -> dict[str, Any]:
             "before the report goes out."
         )
     return summary
+
+
+def _wind_down_reason(inner: dict[str, Any], coordinator: AgentCoordinator | None) -> str | None:
+    """Why the runtime is forcing this scan to wrap up, or ``None`` when it is not.
+
+    A forced wind-down is the runtime's own declaration, never the agent's: the
+    scan budget or the sub-agent reserve was reached, or — in a run with no user
+    attached to extend a limit — the final "finish immediately" warning stage is
+    in force. In that state a rejected finish can cost the scan its report, so
+    the coverage gate records what is unexamined itself instead of blocking.
+    """
+    from zen.core.hooks import FINAL_STAGE_KEY
+
+    if coordinator is not None:
+        if coordinator.budget_stopped:
+            return "the scan budget was reached"
+        if coordinator.reserve_stopped:
+            return "the sub-agent budget reserve was reached"
+    if not inner.get("interactive"):
+        stage = inner.get(FINAL_STAGE_KEY)
+        if isinstance(stage, str) and stage:
+            return f"the {stage} was nearly exhausted"
+    return None
 
 
 @function_tool(timeout=60)
@@ -345,6 +553,7 @@ async def finish_scan(
        A lead you could neither confirm nor rule out is disposed of, not
        dropped — ``finish_scan`` refuses while any undisposed open or
        blocked hypothesis remains, naming it.
+    7. **Coverage accounting (coverage gate).** {coverage_gate}
 
     **Calling this multiple times overwrites the previous report.**
     Make the single call comprehensive.
@@ -485,6 +694,7 @@ async def finish_scan(
         technical_analysis=technical_analysis,
         recommendations=recommendations,
         agent_graph=await coordinator.snapshot() if coordinator is not None else {},
+        wind_down=_wind_down_reason(inner, coordinator),
     )
     if (
         result.get("success")
@@ -494,3 +704,10 @@ async def finish_scan(
     ):
         await coordinator.set_status(me, "completed")
     return json.dumps(result, ensure_ascii=False, default=str)
+
+
+# The coverage gate's teaching text is substituted from its single source, so the
+# description the model reads cannot drift from the gate that enforces it.
+finish_scan.description = finish_scan.description.replace(
+    _COVERAGE_GATE_MARKER, _COVERAGE_GATE_TEACHING
+)

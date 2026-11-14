@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from zen.core.hooks import (
+    FINAL_STAGE_KEY,
     BudgetExceededError,
     BudgetPausedError,
     ReportUsageHooks,
@@ -491,3 +492,51 @@ def test_recomputed_budget_flags(
     expected: tuple[bool, bool],
 ) -> None:
     assert recomputed_budget_flags(cost, max_budget, interactive=interactive) == expected
+
+
+@pytest.mark.asyncio
+async def test_final_turn_stage_is_flagged_on_the_context_and_cleared_below_it() -> None:
+    hooks = ReportUsageHooks(model="test-model", max_turns=100)
+    ctx = _make_warn_context(requests=95)
+
+    await hooks.on_llm_start(ctx, MagicMock(), None, [])
+    assert ctx.context[FINAL_STAGE_KEY] == "turn budget"
+
+    ctx.usage.requests = 86  # URGENT, not the final stage
+    await hooks.on_llm_start(ctx, MagicMock(), None, [])
+    assert FINAL_STAGE_KEY not in ctx.context
+
+
+@pytest.mark.asyncio
+async def test_final_cost_stage_is_flagged_on_the_context() -> None:
+    hooks = _make_hooks(10.0)
+    ctx = _make_context()
+
+    with patch("zen.core.hooks.get_global_report_state", return_value=_make_report_state(9.6)):
+        await hooks.on_llm_start(ctx, MagicMock(), None, [])
+
+    assert ctx.context[FINAL_STAGE_KEY] == "cost budget"
+
+
+@pytest.mark.asyncio
+async def test_final_stage_key_stays_set_on_every_call_inside_the_final_turn_band() -> None:
+    hooks = ReportUsageHooks(model="test-model", max_turns=100)
+    ctx = _make_warn_context(requests=94)  # this model call is turn 95 of 100
+
+    await hooks.on_llm_start(ctx, MagicMock(), None, [])
+    assert ctx.context[FINAL_STAGE_KEY] == "turn budget"
+
+    ctx.usage.requests = 95  # the next call, turn 96
+    await hooks.on_llm_start(ctx, MagicMock(), None, [])
+    assert ctx.context[FINAL_STAGE_KEY] == "turn budget"
+
+
+@pytest.mark.asyncio
+async def test_final_stage_key_stays_set_on_every_call_inside_the_final_cost_band() -> None:
+    hooks = _make_hooks(10.0)
+    ctx = _make_context()
+
+    for cost in (9.5, 9.6):
+        with patch("zen.core.hooks.get_global_report_state", return_value=_make_report_state(cost)):
+            await hooks.on_llm_start(ctx, MagicMock(), None, [])
+        assert ctx.context[FINAL_STAGE_KEY] == "cost budget"

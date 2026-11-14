@@ -259,3 +259,34 @@ async def test_unknown_tool_calls_are_returned_to_the_model(
     )
 
     assert captured["run_config"].tool_not_found_behavior == "return_error_to_model"
+
+
+@pytest.mark.parametrize("interactive", [False, True])
+@pytest.mark.asyncio
+async def test_interactive_flag_reaches_both_the_tool_context_and_the_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    interactive: bool,
+) -> None:
+    """``finish_scan`` reads ``interactive`` from the tool context to decide whether
+    the final warning stage is a forced wind-down, so the runner must put the same
+    flag there that it hands the hooks."""
+    _patch_engine_scaffold(monkeypatch, tmp_path, {"scope": "built-in"})
+    seen: dict[str, Any] = {}
+
+    async def _capture(*_args: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+        raise _make_rate_limit_error()
+
+    monkeypatch.setattr(runner, "run_agent_loop", _capture)
+
+    await runner.run_zen_scan(
+        scan_config={"targets": [], "scan_mode": "deep"},
+        scan_id="scan-wiring",
+        image="img",
+        coordinator=AgentCoordinator(),
+        interactive=interactive,
+    )
+
+    assert seen["context"]["interactive"] is interactive
+    assert seen["hooks"]._interactive is interactive

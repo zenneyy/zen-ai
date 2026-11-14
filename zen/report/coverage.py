@@ -267,6 +267,105 @@ def skill_coverage_gaps(
     return gaps
 
 
+#: The outcome that records a class as open — the only record anyone other than
+#: its own hunter can write for a class nobody examined.
+_OPEN_OUTCOME = "needs_follow_up"
+
+
+def _names_class(risk_area: str, vuln_class: str) -> bool:
+    """True when ``risk_area`` names the class slug as whole words, in order.
+
+    Whole words, not substrings: a three-letter slug sits inside plenty of
+    unrelated words, and a row about one of those must not record the class.
+    """
+    wanted = _normalized(vuln_class).split()
+    words = _normalized(risk_area).split()
+    span = len(wanted)
+    return bool(wanted) and any(
+        words[start : start + span] == wanted for start in range(len(words) - span + 1)
+    )
+
+
+def unrecorded_hunt_classes(
+    entries: list[dict[str, Any]], agent_graph: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Classes a hunter was typed to prosecute that ended with no record.
+
+    The owed set is exact: a class is owed only when a parent assigned it to a
+    hunter through a validated hunt task, which the spawn path stores on the
+    agent as ``hunt_class``. Skills an agent merely carried are background and
+    are never read here.
+
+    A class is recorded when either holds:
+
+    * a hunter assigned that class filed its hunt report — the typed account it
+      owes at ``agent_finish``, and the only thing that says its assignment was
+      carried through to a stated result;
+    * an open (``needs_follow_up``) coverage entry names the class slug in its
+      risk area — the record anyone can write for a class nobody finished.
+
+    Rows a hunter recorded and reports it filed before it stopped stand as its
+    partial account, but they do not record the class: they say what it reached,
+    not what it left. A closure another agent wrote on a silent hunter's behalf
+    is not a record either. Each unrecorded class is returned with the hunters
+    that held it and the rows that already name it but closed it.
+    """
+    statuses = agent_graph.get("statuses")
+    if not isinstance(statuses, dict):
+        return []
+    raw_names = agent_graph.get("names")
+    names: dict[str, Any] = raw_names if isinstance(raw_names, dict) else {}
+    raw_metadata = agent_graph.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+
+    holders: dict[str, list[dict[str, str]]] = {}
+    reported: set[str] = set()
+    for agent_id, status in statuses.items():
+        raw_meta = metadata.get(agent_id)
+        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        vuln_class = meta.get("hunt_class")
+        if meta.get("role") != "hunter" or not isinstance(vuln_class, str) or not vuln_class:
+            continue
+        holders.setdefault(vuln_class, []).append(
+            {
+                "agent_id": str(agent_id),
+                "agent_name": str(names.get(agent_id) or agent_id),
+                "status": str(status),
+            }
+        )
+        if meta.get("hunt_report"):
+            reported.add(vuln_class)
+
+    unrecorded: list[dict[str, Any]] = []
+    for vuln_class, hunters in sorted(holders.items()):
+        if vuln_class in reported:
+            continue
+        naming = [
+            entry for entry in entries if _names_class(str(entry.get("risk_area", "")), vuln_class)
+        ]
+        if any(entry.get("outcome") == _OPEN_OUTCOME for entry in naming):
+            continue
+        unrecorded.append(
+            {
+                "vuln_class": vuln_class,
+                "hunters": hunters,
+                # Rows that already name the class but closed it. They are not a
+                # record of it, and recording the open row over one of them is
+                # refused as a duplicate, so the rejection has to name them.
+                "closed_rows": [
+                    {
+                        "entry_id": str(entry.get("entry_id", "")),
+                        "surface": str(entry.get("surface", "")),
+                        "outcome": str(entry.get("outcome", "")),
+                        "recorded_by": str(entry.get("agent_name") or "unknown"),
+                    }
+                    for entry in naming
+                ],
+            }
+        )
+    return unrecorded
+
+
 def _silent_agent_gaps(
     entries: list[dict[str, Any]], agents: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -390,7 +489,7 @@ def build_coverage_document(
                 for previous in entry.get("history", [])
                 if isinstance(previous, dict)
             ],
-            "source": "agent_reported",
+            "source": str(entry.get("source") or "agent_reported"),
         }
         for entry in entries
     ]
