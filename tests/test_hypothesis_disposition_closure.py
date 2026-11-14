@@ -27,8 +27,16 @@ import pytest
 import zen.tools.detected_stack.tools as stack_mod
 import zen.tools.threat_model.tools as tm
 from zen.tools.finish.tool import _do_finish, _undisposed_open_hypotheses
-from zen.tools.threat_model.schema import HYPOTHESIS_DISPOSITION_VALUES
-from zen.tools.threat_model.tools import _save_impl
+from zen.tools.threat_model.schema import (
+    DEFERRAL_LINE_EXAMPLE,
+    DISPOSITION_LINE_EXAMPLE,
+    HYPOTHESIS_DISPOSITION_VALUES,
+    HYPOTHESIS_EXAMPLE,
+    REFUTATION_CONVENTION,
+    REFUTATION_LINE_EXAMPLE,
+    parse_hypotheses,
+)
+from zen.tools.threat_model.tools import _amend_impl, _save_impl
 
 
 if TYPE_CHECKING:
@@ -213,3 +221,206 @@ def test_an_unknown_disposition_value_is_rejected_field_level() -> None:
     # Field-level and actionable: names the field and lists a valid value.
     assert "disposition" in result["error"]
     assert "deferred" in result["error"]
+
+
+# --- A1: `refuted` states its grounds ----------------------------------------------
+
+_BASE = "- id: {id} | basis: assumed | mechanism: m | predicted_observable: o | state: {state}"
+_GROUNDED = "refutation_basis: attack_failed | refuting_evidence_ids: 101"
+_REASONED = (
+    "refutation_basis: control_verified | "
+    "refutation: the ownership check runs before the read on every route that reaches it"
+)
+
+
+def _lead(lead_id: str, state: str, extra: str = "") -> str:
+    return _BASE.format(id=lead_id, state=state) + (f" | {extra}" if extra else "") + "\n"
+
+
+def test_a_refuted_lead_without_grounds_is_rejected_at_save_naming_every_one() -> None:
+    body = _lead("H1", "refuted") + _lead("H2", "refuted", _GROUNDED) + _lead("H3", "refuted")
+
+    result = _save_impl(_TARGET, _model(body), "root", _SCAN)
+
+    assert result["success"] is False
+    assert result["malformed_hypotheses"] == ["H1", "H3"]
+    assert "'H1'" in result["error"]
+    assert "'H3'" in result["error"]
+    assert "'H2'" not in result["error"]
+    # The rejection carries the exact grammar, and where a not-prosecuted lead belongs.
+    assert REFUTATION_LINE_EXAMPLE in result["error"]
+    assert "disposition" in result["error"]
+    # A rejected save writes nothing.
+    assert tm._MODELS == {}
+
+
+@pytest.mark.parametrize("grounds", [_GROUNDED, _REASONED], ids=["evidence", "reasoning"])
+def test_a_refuted_lead_with_grounds_saves_and_finishes(grounds: str) -> None:
+    saved = _save_impl(_TARGET, _model(_lead("H1", "refuted", grounds)), "root", _SCAN)
+    assert saved["success"] is True, saved
+
+    assert _finish()["success"] is True
+
+
+def test_a_lead_that_was_not_prosecuted_is_disposed_not_refuted() -> None:
+    honest = _lead("H1", "blocked", "disposition: deferred | disposition_reason: not prosecuted")
+
+    assert _save_impl(_TARGET, _model(honest), "root", _SCAN)["success"] is True
+    assert _finish()["success"] is True
+
+
+def test_one_save_rejection_names_convention_and_refutation_offenders_together() -> None:
+    body = (
+        "- id: H1 | mechanism: m | predicted_observable: o | state: open\n"
+        + _lead("H2", "refuted")
+        + "- id: H3 | basis: observed | mechanism: m | predicted_observable: o\n"
+    )
+
+    result = _save_impl(_TARGET, _model(body), "root", _SCAN)
+
+    assert result["success"] is False
+    assert result["malformed_hypotheses"] == ["H1", "H3", "H2"]
+    for lead_id in ("'H1'", "'H2'", "'H3'"):
+        assert lead_id in result["error"]
+
+
+def test_a_single_malformed_hypothesis_keeps_the_message_it_always_had() -> None:
+    body = "- id: H1 | mechanism: m | predicted_observable: o | state: open\n"
+    _, errors = parse_hypotheses(_model(body))
+
+    result = _save_impl(_TARGET, _model(body), "root", _SCAN)
+
+    assert result["error"] == (
+        f"Hypotheses: hypothesis 'H1' is not well-formed — {errors[0].message}. Each hypothesis "
+        f"is one Markdown list item following the convention, e.g. `{HYPOTHESIS_EXAMPLE}`. "
+        "`basis:` is required on every hypothesis; basis 'observed' requires "
+        "supporting_evidence_ids and 'inferred_from_architecture' requires an inference_chain."
+    )
+
+
+def test_a_refutation_basis_outside_the_list_gets_the_whole_grammar_in_one_rejection() -> None:
+    body = _lead("H1", "refuted", "refutation_basis: by_design | refutation: intended behaviour")
+
+    result = _save_impl(_TARGET, _model(body), "root", _SCAN)
+
+    assert result["success"] is False
+    assert result["malformed_hypotheses"] == ["H1"]
+    assert "refutation_basis: Input should be" in result["error"]
+    # One rejection carries the valid kinds and where a non-refutation belongs.
+    assert REFUTATION_CONVENTION in result["error"]
+    assert "accepted_risk" in result["error"]
+
+
+def test_a_new_save_of_refuted_plus_a_disposition_without_grounds_names_both_fixes() -> None:
+    disposed = "disposition: resolved_elsewhere | disposition_reason: covered by H2"
+
+    result = _save_impl(_TARGET, _model(_lead("H1", "refuted", disposed)), "root", _SCAN)
+
+    assert result["success"] is False
+    assert result["malformed_hypotheses"] == ["H1"]
+    assert "refutation_basis" in result["error"]
+    assert "set the state back to open or blocked and keep the disposition" in result["error"]
+    assert tm._MODELS == {}
+    # Either honest fix saves.
+    grounded = _lead("H1", "refuted", f"disposition: resolved_elsewhere | {_REASONED}")
+    relabelled = _lead("H1", "blocked", disposed)
+    assert _save_impl(_TARGET, _model(grounded), "root", _SCAN)["success"] is True
+    assert _save_impl(_TARGET, _model(relabelled), "root", _SCAN)["success"] is True
+
+
+# --- A2: `testing` is undisposed at the finish boundary, and only there -------------
+
+
+def test_a_testing_lead_saves_mid_run_but_blocks_finish_and_is_named() -> None:
+    # The schema and the save are unchanged: `testing` is valid while the scan runs.
+    assert _save_impl(_TARGET, _model(_lead("H1", "testing")), "root", _SCAN)["success"] is True
+
+    result = _finish()
+
+    assert result["success"] is False
+    assert result["undisposed_hypotheses"] == ["H1"]
+    assert result["undisposed_reasons"] == {"H1": "testing"}
+    assert "H1 (testing)" in result["error"]
+
+
+@pytest.mark.parametrize("channel", ["inline", "deferral-record"])
+def test_a_testing_lead_is_disposed_by_either_channel(channel: str) -> None:
+    if channel == "inline":
+        body, tail = _lead("H1", "testing", "disposition: deferred"), ""
+    else:
+        body = _lead("H1", "testing")
+        tail = "\n## Deferred Hypotheses\n- hypothesis_id: H1 | reason: its hunter was stopped\n"
+    assert _save_impl(_TARGET, _HEAD + body + tail + _TAIL, "root", _SCAN)["success"] is True
+
+    assert _finish()["success"] is True
+
+
+# --- leads that reached the store without passing the save gate ---------------------
+
+
+def test_a_legacy_refuted_lead_without_grounds_blocks_finish_and_is_named() -> None:
+    # A model saved before the rule existed, as a resumed run hydrates it.
+    tm._MODELS["legacy"] = {"content": _model(_lead("H1", "refuted"))}
+
+    result = _finish()
+
+    assert result["success"] is False
+    assert result["undisposed_reasons"] == {"H1": "refuted without grounds"}
+    assert REFUTATION_LINE_EXAMPLE in result["error"]
+
+
+@pytest.mark.parametrize(
+    "fixed",
+    [
+        _lead("H1", "refuted", _GROUNDED),
+        _lead("H1", "refuted", "disposition: resolved_elsewhere"),
+        _lead("H1", "blocked", "disposition: deferred"),
+    ],
+    ids=["grounds-added", "recorded-disposition", "relabelled-as-deferred"],
+)
+def test_a_legacy_refuted_lead_is_cleared_by_grounds_or_a_disposition(fixed: str) -> None:
+    tm._MODELS["legacy"] = {"content": _model(fixed)}
+
+    assert _finish()["success"] is True
+
+
+def test_the_closure_rejection_names_every_lead_with_the_grammar_to_fix_each() -> None:
+    tm._MODELS["m"] = {
+        "content": _model(_lead("H1", "open") + _lead("H2", "testing") + _lead("H3", "refuted"))
+    }
+
+    result = _finish()
+
+    assert result["undisposed_hypotheses"] == ["H1", "H2", "H3"]
+    assert "H1 (open), H2 (testing), H3 (refuted without grounds)" in result["error"]
+    for grammar in (DISPOSITION_LINE_EXAMPLE, DEFERRAL_LINE_EXAMPLE, REFUTATION_LINE_EXAMPLE):
+        assert grammar in result["error"]
+    # Where the fix goes: the saved model, not an amendment.
+    assert "save_threat_model" in result["error"]
+    assert "amendment" in result["error"]
+
+
+def test_an_amendment_does_not_dispose_a_lead() -> None:
+    assert _save_impl(_TARGET, _model(_lead("H1", "open")), "root", _SCAN)["success"] is True
+    amended = _amend_impl(
+        _TARGET,
+        "## Deferred Hypotheses\n"
+        "- hypothesis_id: H1 | reason: carried forward, no access to test it in this engagement",
+        "root",
+        _SCAN,
+    )
+    assert amended["success"] is True
+
+    assert _finish()["undisposed_hypotheses"] == ["H1"]
+
+
+def test_a_rejected_save_leaves_the_stored_model_untouched() -> None:
+    good = _model(_lead("H1", "blocked", "disposition: deferred"))
+    assert _save_impl(_TARGET, good, "root", _SCAN)["success"] is True
+    before = {identity: dict(model) for identity, model in tm._MODELS.items()}
+
+    rejected = _save_impl(_TARGET, _model(_lead("H1", "refuted")), "root", _SCAN)
+
+    assert rejected["success"] is False
+    assert before == tm._MODELS
+    assert _finish()["success"] is True

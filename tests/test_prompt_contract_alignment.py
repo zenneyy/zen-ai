@@ -43,6 +43,7 @@ from zen.skills import _INTERNAL_SKILL_CATEGORIES, validate_requested_skills
 from zen.tools.agents_graph.contracts import HuntBasis, HuntTask
 from zen.tools.coverage.tools import record_coverage
 from zen.tools.finish.tool import (
+    CLOSURE_GATE_DISPOSAL_NOTE,
     COVERAGE_GATE_DESCRIPTION,
     COVERAGE_GATE_DISPOSAL_EXAMPLE,
     finish_scan,
@@ -53,8 +54,11 @@ from zen.tools.threat_model.schema import (
     DISPOSITION_CONVENTION,
     DISPOSITION_LINE_EXAMPLE,
     HYPOTHESIS_DISPOSITION_VALUES,
+    REFUTATION_BASIS_VALUES,
+    REFUTATION_CONVENTION,
+    REFUTATION_LINE_EXAMPLE,
 )
-from zen.tools.threat_model.tools import _REQUIRED_SECTIONS
+from zen.tools.threat_model.tools import _REQUIRED_SECTIONS, save_threat_model
 from zen.utils.resource_paths import get_zen_resource_path
 
 
@@ -259,3 +263,30 @@ def test_finish_scan_description_teaches_the_coverage_gate_from_its_single_sourc
     assert COVERAGE_GATE_DESCRIPTION in description
     assert COVERAGE_GATE_DISPOSAL_EXAMPLE in description
     assert "{coverage_gate}" not in description
+
+
+def test_recon_contract_teaches_refutation_grounds_from_the_single_source() -> None:
+    contract = render_contract("recon")
+    assert REFUTATION_CONVENTION in contract
+    assert REFUTATION_LINE_EXAMPLE in contract
+    for basis in REFUTATION_BASIS_VALUES:
+        assert basis in contract, basis
+
+
+def test_root_contract_closure_gate_names_testing_grounds_and_how_to_dispose() -> None:
+    contract = render_contract("root")
+    assert "open, blocked or testing" in contract
+    assert REFUTATION_CONVENTION in contract
+    assert REFUTATION_LINE_EXAMPLE in contract
+    assert CLOSURE_GATE_DISPOSAL_NOTE in contract
+
+
+def test_tool_descriptions_teach_closure_and_refutation_from_their_single_source() -> None:
+    finish = finish_scan.description
+    for text in (DISPOSITION_CONVENTION, REFUTATION_CONVENTION, CLOSURE_GATE_DISPOSAL_NOTE):
+        assert text in finish
+    assert "{closure_gate}" not in finish
+    save = save_threat_model.description
+    assert REFUTATION_CONVENTION in save
+    assert REFUTATION_LINE_EXAMPLE in save
+    assert "{refutation_grounds}" not in save

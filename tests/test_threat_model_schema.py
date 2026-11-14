@@ -9,7 +9,7 @@ no specific vulnerability, technique, or scenario stands in as the subject.
 
 from __future__ import annotations
 
-from typing import get_args
+from typing import Any, get_args
 
 import pytest
 from pydantic import ValidationError
@@ -19,11 +19,15 @@ from zen.tools.threat_model.schema import (
     HYPOTHESIS_BASIS_VALUES,
     HYPOTHESIS_CONVENTION,
     HYPOTHESIS_DISPOSITION_VALUES,
+    REFUTATION_BASIS_VALUES,
     Finding,
     Hypothesis,
     HypothesisDisposition,
+    RefutationBasis,
     parse_hypotheses,
     referenced_evidence_ids,
+    refutation_problem,
+    ungrounded_refutations,
 )
 
 
@@ -251,3 +255,149 @@ def test_parse_hypotheses_reads_an_inline_disposition() -> None:
     assert errors == []
     assert hyps[0].disposition == "deferred"
     assert hyps[0].disposition_reason == "carried forward"
+
+
+# --- refutation grounds: `refuted` states why --------------------------------------
+
+_REASONING_BASES = ("control_verified", "sink_inert", "input_trusted", "not_applicable")
+
+
+def test_refutation_bases_are_one_small_class_agnostic_set() -> None:
+    assert get_args(RefutationBasis) == REFUTATION_BASIS_VALUES
+    assert set(REFUTATION_BASIS_VALUES) == {"attack_failed", *_REASONING_BASES}
+
+
+def test_a_refuted_hypothesis_without_a_basis_still_loads_and_is_named() -> None:
+    # Not a validator: a lead saved before the rule existed must still load, so the
+    # gates can name it instead of crashing on it or losing sight of it.
+    problem = refutation_problem(Hypothesis(id="H1", basis="assumed", state="refuted"))
+    assert problem is not None
+    assert "refutation_basis" in problem
+
+
+@pytest.mark.parametrize("state", ["open", "testing", "blocked", "confirmed"])
+def test_only_a_refuted_state_owes_refutation_grounds(state: str) -> None:
+    assert refutation_problem(Hypothesis(id="H", basis="assumed", state=state)) is None
+
+
+@pytest.mark.parametrize(
+    "grounds",
+    [
+        {"refuting_evidence_ids": ["101"]},
+        {"refutation": "the crafted request was sent and rejected before the handler ran"},
+        {"refuting_evidence_ids": ["101"], "refutation": "sent and rejected at the parser"},
+    ],
+    ids=["evidence-ids", "statement", "both"],
+)
+def test_attack_failed_rests_on_evidence_ids_or_a_statement(grounds: dict[str, Any]) -> None:
+    hypothesis = Hypothesis(
+        id="H", basis="assumed", state="refuted", refutation_basis="attack_failed", **grounds
+    )
+    assert refutation_problem(hypothesis) is None
+
+
+def test_attack_failed_with_neither_evidence_nor_statement_is_a_problem() -> None:
+    hypothesis = Hypothesis(
+        id="H", basis="assumed", state="refuted", refutation_basis="attack_failed"
+    )
+    assert "attack_failed" in (refutation_problem(hypothesis) or "")
+
+
+@pytest.mark.parametrize("basis", _REASONING_BASES)
+def test_a_reasoned_refutation_needs_its_statement_even_with_evidence_ids(basis: str) -> None:
+    bare = Hypothesis(
+        id="H",
+        basis="assumed",
+        state="refuted",
+        refutation_basis=basis,
+        refuting_evidence_ids=["101"],
+    )
+    assert "refutation:" in (refutation_problem(bare) or "")
+    stated = bare.model_copy(update={"refutation": "the check runs before the effect"})
+    assert refutation_problem(stated) is None
+
+
+def test_a_blank_statement_is_no_statement() -> None:
+    hypothesis = Hypothesis(
+        id="H", basis="assumed", state="refuted", refutation_basis="sink_inert", refutation="  "
+    )
+    assert refutation_problem(hypothesis) is not None
+
+
+@pytest.mark.parametrize(
+    ("written", "canonical"),
+    [
+        ("attack_failed", "attack_failed"),
+        ("Attack-Failed", "attack_failed"),
+        ("Not Applicable", "not_applicable"),
+    ],
+)
+def test_refutation_basis_normalizes_organic_spellings(written: str, canonical: str) -> None:
+    hypothesis = Hypothesis(id="H", basis="assumed", state="refuted", refutation_basis=written)
+    assert hypothesis.refutation_basis == canonical
+
+
+def test_an_unknown_refutation_basis_is_rejected_listing_valid_values() -> None:
+    with pytest.raises(ValidationError) as excinfo:
+        Hypothesis(id="H", basis="assumed", state="refuted", refutation_basis="not_pursued")
+    message = str(excinfo.value)
+    assert "refutation_basis" in message
+    assert "attack_failed" in message
+
+
+def test_refuting_evidence_ids_resolve_like_supporting_ids() -> None:
+    raw = {
+        "id": "H5",
+        "basis": "assumed",
+        "state": "refuted",
+        "refutation_basis": "attack_failed",
+        "refuting_evidence_ids": ["101", "999"],
+    }
+    with pytest.raises(ValidationError) as excinfo:
+        Hypothesis.model_validate(raw, context={"known_evidence_ids": {"101"}})
+    message = str(excinfo.value)
+    assert "H5" in message
+    assert "refuting_evidence_ids" in message
+    assert "999" in message
+    # No known set in context: shape only, never rejected wholesale.
+    assert Hypothesis.model_validate(raw).refuting_evidence_ids == ["101", "999"]
+
+
+def test_referenced_evidence_ids_include_refuting_ids() -> None:
+    markdown = (
+        "## Hypotheses\n"
+        "- id: H1 | basis: observed | supporting_evidence_ids: 101 | state: refuted | "
+        "refutation_basis: attack_failed | refuting_evidence_ids: 202, 101\n"
+    )
+    assert referenced_evidence_ids(markdown) == ["101", "202"]
+
+
+def test_parse_hypotheses_reads_refutation_grounds_and_names_ungrounded_ones() -> None:
+    hyps, errors = parse_hypotheses(
+        "## Hypotheses\n"
+        "- id: H1 | basis: assumed | state: refuted | refutation_basis: control_verified | "
+        "refutation: the check runs before the effect on every path\n"
+        "- id: H2 | basis: assumed | state: refuted\n"
+        "- id: H3 | basis: assumed | state: refuted | refutation_basis: input_trusted\n"
+    )
+    # Parsing is unchanged: an ungrounded refutation is well-formed as a record...
+    assert errors == []
+    assert hyps[0].refutation_basis == "control_verified"
+    # ...and the grounds rule names every offender at once.
+    named = ungrounded_refutations(hyps)
+    assert [e.hypothesis_id for e in named] == ["H2", "H3"]
+    assert "refutation_basis" in named[0].message
+    assert "input_trusted" in named[1].message
+
+
+def test_an_ungrounded_refutation_that_carries_a_disposition_is_told_both_fixes() -> None:
+    hypothesis = Hypothesis(
+        id="H", basis="assumed", state="refuted", disposition="resolved_elsewhere"
+    )
+    problem = refutation_problem(hypothesis) or ""
+    assert "refutation_basis" in problem
+    assert "disposition: resolved_elsewhere" in problem
+    assert "back to open or blocked" in problem
+    # Without a disposition there is only one fix to name.
+    bare = refutation_problem(Hypothesis(id="H", basis="assumed", state="refuted")) or ""
+    assert "back to open or blocked" not in bare

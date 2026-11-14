@@ -11,8 +11,8 @@ These pin the three structural guarantees 1.5 adds, all class-agnostic:
   naming the class and the component or boundary that implied it, and is a no-op
   when no architecture is registered;
 * the finish-time **closure gate** refuses to end a run while any hypothesis is
-  left open or blocked with no recorded disposition (a terminal state or an
-  explicit deferral).
+  left open, blocked or testing with no recorded disposition (a terminal state
+  or an explicit deferral), or refuted with no stated grounds.
 
 No specific technique, benchmark, or scenario stands in as the subject — the
 fixtures are neutral structural placeholders.
@@ -203,14 +203,17 @@ def test_unaddressed_shrinks_as_classes_are_addressed() -> None:
     assert {c for c, _ in unaddressed_implied_classes(dismissed, arch)} == _BASELINE - {"business_logic"}
 
 
-# --- closure gate: no open/blocked hypothesis left undisposed --------------------
+# --- closure gate: no hypothesis left undisposed ---------------------------------
 
 
-def _model_with_hypothesis(state: str, *, deferral: bool = False, disposition: str = "") -> str:
+def _model_with_hypothesis(
+    state: str, *, deferral: bool = False, disposition: str = "", extra: str = ""
+) -> str:
     disp = f" | disposition: {disposition}" if disposition else ""
+    more = f" | {extra}" if extra else ""
     body = (
         "# Threat Model\n\n## Hypotheses\n"
-        f"- id: H1 | basis: assumed | mechanism: x | predicted_observable: y | state: {state}{disp}\n"
+        f"- id: H1 | basis: assumed | mechanism: x | predicted_observable: y | state: {state}{disp}{more}\n"
     )
     if deferral:
         body += (
@@ -225,16 +228,22 @@ def test_open_and_blocked_without_disposition_are_undisposed(state: str) -> None
     assert _undisposed_open_hypotheses(_model_with_hypothesis(state)) == ["H1"]
 
 
-@pytest.mark.parametrize("state", ["testing", "confirmed", "refuted"])
-def test_terminal_or_in_progress_states_are_not_undisposed(state: str) -> None:
-    assert _undisposed_open_hypotheses(_model_with_hypothesis(state)) == []
+def test_confirmed_and_grounded_refuted_are_terminal() -> None:
+    grounds = "refutation_basis: attack_failed | refuting_evidence_ids: 101"
+    assert _undisposed_open_hypotheses(_model_with_hypothesis("confirmed")) == []
+    assert _undisposed_open_hypotheses(_model_with_hypothesis("refuted", extra=grounds)) == []
+
+
+@pytest.mark.parametrize("state", ["testing", "refuted"])
+def test_in_progress_and_ungrounded_refuted_are_undisposed_at_finish(state: str) -> None:
+    assert _undisposed_open_hypotheses(_model_with_hypothesis(state)) == ["H1"]
 
 
 def test_a_deferral_disposes_an_open_hypothesis() -> None:
     assert _undisposed_open_hypotheses(_model_with_hypothesis("open", deferral=True)) == []
 
 
-@pytest.mark.parametrize("state", ["open", "blocked"])
+@pytest.mark.parametrize("state", ["open", "blocked", "testing"])
 def test_an_inline_disposition_disposes_a_lead(state: str) -> None:
     # The low-friction channel the live agent reaches for: a disposition written
     # straight onto the hypothesis line satisfies the closure gate, in place of a

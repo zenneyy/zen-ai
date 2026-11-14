@@ -406,18 +406,16 @@ def test_forced_wind_down_records_the_class_itself_and_still_finalizes(
     assert len([r for r in get_coverage_entries() if r.get("agent_name") == "system"]) == 1
 
 
-def test_a_wind_down_does_not_waive_the_closure_gate_or_write_while_blocked(
-    run: ReportState,
-) -> None:
+def test_a_wind_down_records_the_lead_and_the_class_and_finalizes(run: ReportState) -> None:
     tm._MODELS["target"] = {"content": _OPEN_LEAD}
 
     result = _finish(_hunt_graph(), wind_down=_RESERVE)
 
-    assert result["success"] is False
-    assert result["undisposed_hypotheses"] == ["H1"]
-    assert "unrecorded_classes" not in result
-    assert get_coverage_entries() == []
-    assert not _persisted(run)
+    assert result["success"] is True
+    assert result["system_recorded_undisposed"] == ["H1"]
+    assert result["system_recorded_unexamined"] == ["xss"]
+    assert _persisted(run)
+    assert [row.get("source") for row in get_coverage_entries()] == ["runtime", "runtime"]
 
 
 def test_a_lead_and_a_class_are_named_in_one_rejection(run: ReportState) -> None:
@@ -524,6 +522,96 @@ def test_a_wind_down_mid_disposal_records_only_what_is_still_unrecorded() -> Non
     assert recorded_by == {"xss": "Root Agent", "ssrf": "system"}
 
 
+# --- the closure gate under a forced wind-down --------------------------------------
+
+_RECORDED_AS = {
+    "open": "`open`",
+    "blocked": "`blocked`",
+    "testing": "`testing`",
+    "refuted": "`refuted` with no stated grounds",
+}
+
+
+def _lead_model(state: str, extra: str = "") -> dict[str, str]:
+    more = f" | {extra}" if extra else ""
+    return {"content": f"## Hypotheses\n- id: H1 | basis: assumed | state: {state}{more}\n"}
+
+
+def _system_lead_rows() -> list[dict[str, Any]]:
+    return [
+        row
+        for row in get_coverage_entries()
+        if row.get("agent_name") == "system" and row["surface"].startswith("Threat-model lead")
+    ]
+
+
+@pytest.mark.parametrize("state", list(_RECORDED_AS))
+def test_a_wind_down_records_an_undisposed_lead_itself_and_still_finalizes(
+    run: ReportState, state: str
+) -> None:
+    tm._MODELS["target"] = _lead_model(state, "vuln_class: xss")
+    before = dict(tm._MODELS["target"])
+
+    result = _finish({}, wind_down=_RESERVE)
+
+    assert result["success"] is True
+    assert result["system_recorded_undisposed"] == ["H1"]
+    assert _persisted(run)
+    rows = _system_lead_rows()
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "needs_follow_up"
+    assert rows[0]["source"] == "runtime"
+    assert "H1" in rows[0]["surface"]
+    evidence = rows[0]["evidence"]
+    # The row says what the runtime knows: the recorded state, that no disposition
+    # was recorded, and that the model was not re-saved before the forced finish...
+    assert f"as {_RECORDED_AS[state]}, with no disposition" in evidence
+    assert "was not re-saved before the scan finished" in evidence
+    # ...and makes no claim about what was or was not tested.
+    for claim in ("prosecuted", "tested", "examined", "clean"):
+        assert claim not in evidence
+    # The runtime publishes the lead; it never rewrites the lead's own record.
+    assert tm._MODELS["target"] == before
+
+
+def test_outside_a_wind_down_a_testing_lead_blocks_and_nothing_is_written(
+    run: ReportState,
+) -> None:
+    tm._MODELS["target"] = _lead_model("testing")
+
+    result = _finish({})
+
+    assert result["success"] is False
+    assert result["undisposed_reasons"] == {"H1": "testing"}
+    assert get_coverage_entries() == []
+    assert not _persisted(run)
+    assert run.run_record["status"] == "running"
+
+
+@pytest.mark.usefixtures("run")
+def test_retrying_a_wind_down_finish_records_each_lead_once() -> None:
+    tm._MODELS["target"] = _lead_model("testing")
+
+    first = _finish({}, wind_down=_RESERVE)
+    second = _finish({}, wind_down=_RESERVE)
+
+    assert first["system_recorded_undisposed"] == ["H1"]
+    assert second["system_recorded_undisposed"] == ["H1"]
+    assert len(_system_lead_rows()) == 1
+
+
+@pytest.mark.usefixtures("run")
+def test_a_runtime_lead_row_never_records_a_hunt_class() -> None:
+    """The lead row names a lead, not a class: the coverage gate's accounting of an
+    assigned class is untouched by it."""
+    recorded = finish_tool._record_undisposed_leads(
+        [{"id": "H1", "why": "testing", "vuln_class": "xss"}], _RESERVE
+    )
+    assert recorded == ["H1"]
+
+    assert _finish(_hunt_graph())["unrecorded_classes"] == ["xss"]
+
+
 # --- through the tool: hypotheses x coverage x mode, and the wind-down signals ------
 
 
@@ -549,7 +637,9 @@ async def _graph_run(coverage: str) -> AgentCoordinator:
     return coordinator
 
 
-async def _call_finish(coordinator: AgentCoordinator, **context: Any) -> dict[str, Any]:
+async def _call_finish(
+    coordinator: AgentCoordinator, *, report: str = "x", **context: Any
+) -> dict[str, Any]:
     ctx = ToolContext(
         context={"coordinator": coordinator, "agent_id": "root", "parent_id": None, **context},
         tool_name="finish_scan",
@@ -557,7 +647,7 @@ async def _call_finish(coordinator: AgentCoordinator, **context: Any) -> dict[st
         tool_arguments="{}",
     )
     fields = ("executive_summary", "methodology", "technical_analysis", "recommendations")
-    raw: str = await finish_scan.on_invoke_tool(ctx, json.dumps(dict.fromkeys(fields, "x")))
+    raw: str = await finish_scan.on_invoke_tool(ctx, json.dumps(dict.fromkeys(fields, report)))
     return cast("dict[str, Any]", json.loads(raw))
 
 
@@ -623,14 +713,14 @@ async def test_a_finish_one_call_later_in_the_final_band_still_winds_down(
 
     wrapper.usage.requests = 94  # this model call is turn 95 of 100
     await hooks.on_llm_start(wrapper, MagicMock(), None, [])
-    first = await _call_finish(coordinator, **context)
-    assert first["undisposed_hypotheses"] == ["H1"]  # the closure gate, unchanged
+    first = await _call_finish(coordinator, report=" ", **context)
+    assert first["error"] == "Validation failed"  # rejected before any gate ran
     assert not _persisted(run)
 
-    tm._MODELS["target"] = {"content": _DISPOSED_LEAD}
     wrapper.usage.requests = 95  # the next call, turn 96
     await hooks.on_llm_start(wrapper, MagicMock(), None, [])
     second = await _call_finish(coordinator, **context)
     assert second["success"] is True
     assert second["system_recorded_unexamined"] == ["xss"]
+    assert second["system_recorded_undisposed"] == ["H1"]
     assert _persisted(run)

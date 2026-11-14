@@ -40,9 +40,12 @@ from zen.tools.threat_model.schema import (
     DISMISSAL_LINE_EXAMPLE,
     HYPOTHESES_SECTION_ALIASES,
     HYPOTHESIS_EXAMPLE,
+    REFUTATION_CONVENTION,
+    REFUTATION_LINE_EXAMPLE,
     parse_dismissed_classes,
     parse_hypotheses,
     referenced_evidence_ids,
+    ungrounded_refutations,
 )
 
 
@@ -50,6 +53,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from zen.tools.ledger.store import ResearchLedger
+    from zen.tools.threat_model.schema import HypothesisParseError
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,11 @@ _MIN_AMENDMENT_CHARS = 80
 _MAX_AMENDMENTS = 40
 _GIT_TIMEOUT_SECONDS = 10
 _DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+# Replaced in the ``save_threat_model`` description (bottom of this module) by the
+# refutation-grounds rule from its single source.
+_REFUTATION_MARKER = "{refutation_grounds}"
+_REFUTATION_TEACHING = f"{REFUTATION_CONVENTION} For example: `{REFUTATION_LINE_EXAMPLE}`."
 
 _store_lock = threading.RLock()
 
@@ -655,6 +664,40 @@ def _render_carried_forward_amendments(amendments: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _hypothesis_rejection(
+    convention_errors: list[HypothesisParseError],
+    refutation_errors: list[HypothesisParseError],
+) -> dict[str, Any]:
+    """One rejection naming every malformed hypothesis, so one re-save can fix them all.
+
+    The first offender keeps the sentence this gate has always returned; further
+    offenders follow it, each with its own message. The refutation grammar is
+    appended only when a refutation is among them.
+    """
+    first, *rest = [*convention_errors, *refutation_errors]
+    also = ""
+    if rest:
+        listed = "; ".join(f"{error.hypothesis_id!r} — {error.message}" for error in rest)
+        also = f" Also not well-formed: {listed}."
+    # A refutation that states no grounds, or names a basis outside the list, gets the
+    # whole refutation grammar in the same rejection, so it is fixable in one re-save.
+    about_refutation = bool(refutation_errors) or any(
+        error.message.startswith("refutation_basis") for error in convention_errors
+    )
+    refutation_help = f" {_REFUTATION_TEACHING}" if about_refutation else ""
+    return {
+        "success": False,
+        "error": (
+            f"Hypotheses: hypothesis {first.hypothesis_id!r} is not well-formed — "
+            f"{first.message}.{also} Each hypothesis is one Markdown list item following the "
+            f"convention, e.g. `{HYPOTHESIS_EXAMPLE}`. `basis:` is required on every "
+            "hypothesis; basis 'observed' requires supporting_evidence_ids and "
+            f"'inferred_from_architecture' requires an inference_chain.{refutation_help}"
+        ),
+        "malformed_hypotheses": [error.hypothesis_id for error in (first, *rest)],
+    }
+
+
 def _save_impl(  # noqa: PLR0911
     target: str,
     content: str,
@@ -707,22 +750,16 @@ def _save_impl(  # noqa: PLR0911
     _hypotheses, hypothesis_errors = parse_hypotheses(
         body, known_evidence_ids=known_evidence_ids
     )
-    if hypothesis_errors:
+    # Refutation-grounds gate: a hypothesis saved as `refuted` states on what
+    # grounds. Evaluated with the convention errors so one rejection names every
+    # offender, whichever rule it broke.
+    refutation_errors = ungrounded_refutations(_hypotheses)
+    if hypothesis_errors or refutation_errors:
         logger.debug(
             "threat_model rejected — hypothesis convention: %s",
-            [(e.hypothesis_id, e.message) for e in hypothesis_errors],
+            [(e.hypothesis_id, e.message) for e in (*hypothesis_errors, *refutation_errors)],
         )
-        first = hypothesis_errors[0]
-        return {
-            "success": False,
-            "error": (
-                f"Hypotheses: hypothesis {first.hypothesis_id!r} is not well-formed — "
-                f"{first.message}. Each hypothesis is one Markdown list item following the "
-                f"convention, e.g. `{HYPOTHESIS_EXAMPLE}`. `basis:` is required on every "
-                "hypothesis; basis 'observed' requires supporting_evidence_ids and "
-                "'inferred_from_architecture' requires an inference_chain."
-            ),
-        }
+        return _hypothesis_rejection(hypothesis_errors, refutation_errors)
 
     unenumerated = _unenumerated_indirect_services()
     if unenumerated:
@@ -1068,6 +1105,7 @@ async def save_threat_model(ctx: RunContextWrapper, target: str, content: str) -
       <why it does not apply here>`.  Do not rank or sequence hypotheses
       into an attack plan — report them as a set, each with its basis, so
       the consuming agent can form its own priorities from the evidence.
+      A hypothesis marked refuted states its grounds: {refutation_grounds}
     - **Severity Calibration** — what critical / high / medium / low
       look like for *this* target, with a concrete example at each
       level. Where a vulnerability class needs attacker control that
@@ -1143,3 +1181,10 @@ async def amend_threat_model(ctx: RunContextWrapper, target: str, addendum: str)
         ensure_ascii=False,
         default=str,
     )
+
+
+# The refutation-grounds rule is substituted from its single source, so the
+# description the model reads cannot drift from the gate that enforces it.
+save_threat_model.description = save_threat_model.description.replace(
+    _REFUTATION_MARKER, _REFUTATION_TEACHING
+)

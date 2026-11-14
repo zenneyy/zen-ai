@@ -23,6 +23,7 @@ import zen.tools.threat_model.tools as tm_tools
 from zen.tools.finish.tool import _undisposed_hypotheses_across_run
 from zen.tools.ledger import ResearchLedger, set_ledger
 from zen.tools.threat_model.implied_classes import implied_classes
+from zen.tools.threat_model.schema import Hypothesis
 
 
 if TYPE_CHECKING:
@@ -226,6 +227,54 @@ def test_closure_gate_lets_a_disposed_hypothesis_pass_from_the_ledger(
         scan_targets=[TARGET],
     )["success"] is True
     assert _undisposed_hypotheses_across_run() == []
+
+
+def test_closure_gate_holds_a_testing_lead_from_the_ledger(ledger_run: ResearchLedger) -> None:
+    hops = [{"name": "app", "role": "application handler"}]
+    _register_only_in_ledger(ledger_run, hops)
+    testing = _OPEN_HYP.replace("state: open", "state: testing")
+    saved = tm_tools._save_impl(
+        TARGET,
+        _model(hypotheses=testing, dismissals=_dismissals(hops)),
+        "root",
+        scan_targets=[TARGET],
+    )
+    assert saved["success"] is True
+    assert _undisposed_hypotheses_across_run() == ["H1"]
+
+
+def test_closure_gate_names_a_replayed_ungrounded_refutation_without_raising(
+    ledger_run: ResearchLedger,
+) -> None:
+    """A row written before the rule existed is replayed from the event log, not
+    re-saved: it must load, and the gate must name it rather than crash or pass it."""
+    ledger_run.record_model(
+        TARGET,
+        content="## Hypotheses\n- id: H1 | basis: assumed | state: refuted\n",
+        written_by="root",
+        written_at="2026-01-01T00:00:00+00:00",
+        hypotheses=[Hypothesis(id="H1", basis="assumed", state="refuted")],
+    )
+    ledger_run.replay()
+
+    assert _undisposed_hypotheses_across_run() == ["H1"]
+
+
+def test_an_ungrounded_refutation_is_rejected_and_nothing_enters_the_ledger(
+    ledger_run: ResearchLedger,
+) -> None:
+    hops = [{"name": "app", "role": "application handler"}]
+    _register_only_in_ledger(ledger_run, hops)
+    refuted = _OPEN_HYP.replace("state: open", "state: refuted")
+    result = tm_tools._save_impl(
+        TARGET,
+        _model(hypotheses=refuted, dismissals=_dismissals(hops)),
+        "root",
+        scan_targets=[TARGET],
+    )
+    assert result["success"] is False
+    assert result["malformed_hypotheses"] == ["H1"]
+    assert ledger_run.get_hypotheses() == []
 
 
 # ── the document contract (the view over the ledger) ─────────────────────────

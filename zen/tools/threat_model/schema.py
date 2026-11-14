@@ -147,11 +147,11 @@ HYPOTHESIS_CONVENTION = _HypothesisConventionSpec(
 HYPOTHESIS_BASIS_VALUES: tuple[str, ...] = ("observed", "inferred_from_architecture", "assumed")
 
 
-# ── hypothesis disposition (how an open/blocked lead is handled at closure) ───
+# ── hypothesis disposition (how an undisposed lead is handled at closure) ─────
 #
-# A hypothesis left ``open`` or ``blocked`` at scan close is not dropped in
-# silence — it carries an explicit *disposition* recording how the lead was
-# handled. This is the low-friction, INLINE channel: a ``disposition:`` field
+# A hypothesis left ``open``, ``blocked`` or ``testing`` at scan close is not
+# dropped in silence — it carries an explicit *disposition* recording how the lead
+# was handled. This is the low-friction, INLINE channel: a ``disposition:`` field
 # written straight onto the hypothesis line, which is what an agent reaches for
 # first. It sits alongside the dedicated ``## Deferred Hypotheses`` section
 # further down; both record the same thing and both satisfy the finish-time
@@ -163,7 +163,7 @@ HYPOTHESIS_BASIS_VALUES: tuple[str, ...] = ("observed", "inferred_from_architect
 # handled*, never a vulnerability class and never a difficulty.
 
 HypothesisDisposition = Literal["deferred", "accepted_risk", "out_of_scope", "resolved_elsewhere"]
-"""How an open/blocked hypothesis was handled at closure:
+"""How a hypothesis left open, blocked or testing was handled at closure:
 
 * ``deferred`` — carried forward for later work (needs access, time, or a
   precondition not met this engagement);
@@ -171,7 +171,8 @@ HypothesisDisposition = Literal["deferred", "accepted_risk", "out_of_scope", "re
 * ``out_of_scope`` — judged to lie outside this engagement's scope;
 * ``resolved_elsewhere`` — handled by another hypothesis, finding, or report.
 
-A ``confirmed`` / ``refuted`` hypothesis is already terminal and needs none."""
+A ``confirmed`` hypothesis, or a ``refuted`` one that states its grounds
+(:data:`REFUTATION_CONVENTION`), is terminal and needs none."""
 
 HYPOTHESIS_DISPOSITION_VALUES: tuple[str, ...] = get_args(HypothesisDisposition)
 """The disposition values as a tuple — surfaced for the CONTRACT, the closure-gate
@@ -179,20 +180,79 @@ message, and the alignment test. Derived from the Literal so there is one source
 
 DISPOSITION_LINE_EXAMPLE = (
     "- id: <id> | basis: <basis> | ... | state: blocked | disposition: deferred | "
-    "disposition_reason: <why this open/blocked lead is carried forward rather than resolved now>"
+    "disposition_reason: <why this lead is carried forward rather than resolved now>"
 )
 """The inline-disposition grammar, shown verbatim in the generated CONTRACT and the
 closure-gate rejection so the grammar taught is the grammar the gate reads."""
 
 DISPOSITION_CONVENTION = (
-    "A hypothesis left `state: open` or `state: blocked` at scan close records how the lead "
-    "was handled with an inline `disposition:` field on its own hypothesis line — one of "
-    f"{', '.join(HYPOTHESIS_DISPOSITION_VALUES)} (optionally a free-text `disposition_reason:`). "
-    "A `confirmed` or `refuted` hypothesis is already terminal and needs none; a dedicated "
-    "`## Deferred Hypotheses` record carries the same disposition where that reads more naturally."
+    "A hypothesis left `state: open`, `state: blocked` or `state: testing` at scan close "
+    "records how the lead was handled with an inline `disposition:` field on its own "
+    f"hypothesis line — one of {', '.join(HYPOTHESIS_DISPOSITION_VALUES)} (optionally a "
+    "free-text `disposition_reason:`). `testing` is a valid state while the scan runs; once "
+    "it ends nothing is still testing the lead, so it is disposed like an open one. A "
+    "`confirmed` hypothesis, or a `refuted` one that states its grounds, is terminal and "
+    "needs none; a dedicated `## Deferred Hypotheses` record carries the same disposition "
+    "where that reads more naturally."
 )
 """One class-agnostic statement of the disposition rule, consumed by the closure-gate
 rejection and the generated CONTRACT so the teaching and the enforcement are one source."""
+
+
+# ── refutation grounds (what makes ``state: refuted`` a statement, not a label) ─
+#
+# ``refuted`` is terminal: the closure gate asks nothing more of it. So it has to
+# mean *disproved*, and say on what grounds — the discipline the basis rules apply
+# to a claim, applied to the claim's rejection. The kinds are the always-on closure
+# doctrine's own list of what rules a candidate out, plus the coverage ledger's
+# "cannot apply here". A lead set down unprosecuted is absent on purpose: its
+# honest record is a disposition, above.
+
+RefutationBasis = Literal[
+    "attack_failed",
+    "control_verified",
+    "sink_inert",
+    "input_trusted",
+    "not_applicable",
+]
+"""What a refutation rests on:
+
+* ``attack_failed`` — an attack, a probe set or a search was executed against the
+  target and came back negative, and why it failed, or what it covered, is stated;
+* ``control_verified`` — a specific control, at a stated location, runs on every
+  attacker-reachable path before the effect;
+* ``sink_inert`` — the sink is not dangerous in this context, and what makes it
+  inert is stated;
+* ``input_trusted`` — the input is not attacker-controlled, traced to a trusted
+  origin rather than assumed;
+* ``not_applicable`` — the surface or precondition the hypothesis presupposes does
+  not exist here.
+
+Class-agnostic: each names a way of knowing, never a vulnerability class."""
+
+REFUTATION_BASIS_VALUES: tuple[str, ...] = get_args(RefutationBasis)
+"""The refutation kinds as a tuple, derived from the Literal so there is one source."""
+
+REFUTATION_LINE_EXAMPLE = (
+    "- id: <id> | basis: <basis> | ... | state: refuted | refutation_basis: attack_failed | "
+    "refuting_evidence_ids: <evidence-id>, <evidence-id> | "
+    "refutation: <what was executed, and why it failed>"
+)
+"""The refutation grammar, shown verbatim wherever the rule is taught or enforced."""
+
+REFUTATION_CONVENTION = (
+    "`state: refuted` says the lead was disproved, so its own hypothesis line states the "
+    f"grounds: `refutation_basis:` — one of {', '.join(REFUTATION_BASIS_VALUES)} — and a "
+    "free-text `refutation:` naming what was executed (an attack, a probe set or a search) "
+    "and why it failed, the control and where it runs on every attacker-reachable path, what "
+    "makes the sink inert, the trusted origin of the input, or why the risk cannot apply "
+    "here. Only `attack_failed` may rest on `refuting_evidence_ids` (ids of the recorded "
+    "evidence) with no `refutation:` text. A lead that was not prosecuted, was set aside, or "
+    "could not be tested is not refuted, and neither is one covered by another finding "
+    "(`resolved_elsewhere`) or behaviour that is real but intended or harmless "
+    "(`accepted_risk`): leave the state open or blocked and record the `disposition:`."
+)
+"""One class-agnostic statement of the refutation-grounds rule."""
 
 
 # ── evidence-id shape ────────────────────────────────────────────────────────
@@ -279,7 +339,21 @@ class Hypothesis(BaseModel):
 
     refuting_evidence_ids: list[str] = Field(default_factory=list)
     """Ids of recorded evidence that argue against the hypothesis — the
-    counter-case, kept alongside the supporting case."""
+    counter-case, kept alongside the supporting case. For a ``refuted``
+    hypothesis whose ``refutation_basis`` is ``attack_failed`` they can be the
+    stated grounds on their own. Shape-validated always, and resolved against a
+    known-evidence set exactly as ``supporting_evidence_ids`` are."""
+
+    refutation_basis: RefutationBasis | None = None
+    """What a ``refuted`` state rests on — one of :data:`REFUTATION_BASIS_VALUES`.
+    Required for ``state: refuted`` (see :func:`refutation_problem`). Like
+    ``basis``, this is grounding and nothing else. Organic spellings are
+    normalized onto the canonical token and a blank value is unset."""
+
+    refutation: str = ""
+    """The stated grounds of a refutation, in the author's words. Required for
+    every ``refutation_basis`` except ``attack_failed``, which may cite
+    ``refuting_evidence_ids`` instead."""
 
     inference_chain: list[str] = Field(default_factory=list)
     """The architecture-to-hypothesis reasoning steps for an
@@ -321,15 +395,17 @@ class Hypothesis(BaseModel):
 
     state: HypothesisState = "open"
     """Where the hypothesis stands: ``open`` (untried), ``testing`` (in
-    progress), ``confirmed``, ``refuted``, or ``blocked`` (needs access or a
-    precondition that is not yet met)."""
+    progress — a mid-run state; at scan close it needs a disposition like
+    ``open``), ``confirmed``, ``refuted`` (disproved, with ``refutation_basis``
+    stating on what grounds), or ``blocked`` (needs access or a precondition
+    that is not yet met)."""
 
     disposition: HypothesisDisposition | None = None
-    """How this lead was handled when it is left ``open``/``blocked`` at scan
-    close — one of :data:`HYPOTHESIS_DISPOSITION_VALUES`. This is the inline,
+    """How this lead was handled when it is left ``open``/``blocked``/``testing``
+    at scan close — one of :data:`HYPOTHESIS_DISPOSITION_VALUES`. This is the inline,
     low-friction channel the finish-time closure gate accepts in place of a
     terminal (``confirmed``/``refuted``) state or a dedicated
-    ``## Deferred Hypotheses`` record: an open/blocked hypothesis that carries a
+    ``## Deferred Hypotheses`` record: such a hypothesis that carries a
     disposition counts as handled; one that carries none blocks the scan from
     finishing and is named. It records *how the lead was handled*, never a
     vulnerability class, and a terminal hypothesis needs none. Organic spellings
@@ -337,7 +413,7 @@ class Hypothesis(BaseModel):
     canonical token, and a blank value is treated as unset, not as an error."""
 
     disposition_reason: str = ""
-    """Free-text reason for the ``disposition`` — why this open/blocked lead is
+    """Free-text reason for the ``disposition`` — why this lead is
     carried forward, accepted, scoped out, or resolved elsewhere. Advisory for the
     reader and strongly encouraged, but optional: the typed ``disposition`` is
     what the closure gate reads."""
@@ -371,10 +447,11 @@ class Hypothesis(BaseModel):
             )
         return value
 
-    @field_validator("disposition", mode="before")
+    @field_validator("disposition", "refutation_basis", mode="before")
     @classmethod
     def _normalize_disposition(cls, value: object) -> str | None:
-        """Accept the disposition in whatever spelling it was written; blank → unset.
+        """Accept the disposition (and the refutation basis, typed the same way) in
+        whatever spelling it was written; blank → unset.
 
         The field is typed by a hand-written markdown line, so it arrives however
         the author spelled it — ``Deferred``, ``accepted-risk``, ``out of scope``.
@@ -415,13 +492,18 @@ class Hypothesis(BaseModel):
         known = info.context.get("known_evidence_ids") if info.context else None
         if known is not None:
             known_set = set(known)
-            unknown = [eid for eid in self.supporting_evidence_ids if eid not in known_set]
-            if unknown:
-                raise ValueError(
-                    f"hypothesis {self.id!r}: supporting_evidence_ids do not resolve to recorded "
-                    f"evidence: {sorted(unknown)}. Cite ids of evidence the run actually "
-                    "captured (proxy request ids), not invented references."
-                )
+            cited = {
+                "supporting_evidence_ids": self.supporting_evidence_ids,
+                "refuting_evidence_ids": self.refuting_evidence_ids,
+            }
+            for field_name, evidence_ids in cited.items():
+                unknown = [eid for eid in evidence_ids if eid not in known_set]
+                if unknown:
+                    raise ValueError(
+                        f"hypothesis {self.id!r}: {field_name} do not resolve to recorded "
+                        f"evidence: {sorted(unknown)}. Cite ids of evidence the run actually "
+                        "captured (proxy request ids), not invented references."
+                    )
         return self
 
 
@@ -618,8 +700,57 @@ def parse_hypotheses(
     return hypotheses, errors
 
 
+def refutation_problem(hypothesis: Hypothesis) -> str | None:
+    """Why a ``refuted`` hypothesis does not state its grounds, or ``None`` if it does.
+
+    The one definition of the refutation-grounds rule, read by the save gate
+    (which rejects) and the finish-time closure gate (which treats the lead as
+    undisposed). A function rather than a model validator on purpose: hypotheses
+    saved before the rule existed are rebuilt from the ledger and re-parsed from
+    the stored document at finish, and a validator would either raise there or
+    drop the entry from the gate's sight. As a predicate, an old ungrounded
+    refutation still loads and is named.
+
+    When the line also carries a ``disposition`` the message names both honest
+    fixes: state the grounds, or set the state back and keep the disposition. A
+    refutation and a disposition are two different records of one lead, and a new
+    save has to say which it is.
+    """
+    if hypothesis.state != "refuted":
+        return None
+    basis = hypothesis.refutation_basis
+    stated = bool(hypothesis.refutation.strip())
+    evidenced = bool(hypothesis.refuting_evidence_ids)
+    if basis is None:
+        problem = "state 'refuted' states no grounds — add `refutation_basis:` and its grounds"
+    elif basis == "attack_failed" and not (stated or evidenced):
+        problem = (
+            "refutation_basis 'attack_failed' needs `refuting_evidence_ids` or a "
+            "`refutation:` statement"
+        )
+    elif basis != "attack_failed" and not stated:
+        problem = f"refutation_basis {basis!r} needs a `refutation:` statement"
+    else:
+        return None
+    if hypothesis.disposition is not None:
+        problem += (
+            f"; or, since it carries `disposition: {hypothesis.disposition}`, set the state "
+            "back to open or blocked and keep the disposition"
+        )
+    return problem
+
+
+def ungrounded_refutations(hypotheses: Sequence[Hypothesis]) -> list[HypothesisParseError]:
+    """Every ``refuted`` hypothesis that does not state its grounds, named for a rejection."""
+    return [
+        HypothesisParseError(hypothesis.id, problem)
+        for hypothesis in hypotheses
+        if (problem := refutation_problem(hypothesis)) is not None
+    ]
+
+
 def referenced_evidence_ids(markdown: str) -> list[str]:
-    """Every ``supporting_evidence_id`` referenced by a parseable hypothesis entry.
+    """Every evidence id — supporting or refuting — a hypothesis entry references.
 
     Best-effort and non-raising: used by the save path to resolve referenced ids
     against the live proxy project before the authoritative parse. Entries that
@@ -629,11 +760,13 @@ def referenced_evidence_ids(markdown: str) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
     for line in _entry_lines(section):
-        for raw in _parse_entry_fields(line).get("supporting_evidence_ids", []) or []:
-            token = str(raw).strip()
-            if token and token not in seen:
-                seen.add(token)
-                ordered.append(token)
+        fields = _parse_entry_fields(line)
+        for key in ("supporting_evidence_ids", "refuting_evidence_ids"):
+            for raw in fields.get(key, []) or []:
+                token = str(raw).strip()
+                if token and token not in seen:
+                    seen.add(token)
+                    ordered.append(token)
     return ordered
 
 
@@ -778,6 +911,9 @@ __all__ = [
     "HYPOTHESIS_CONVENTION",
     "HYPOTHESIS_DISPOSITION_VALUES",
     "HYPOTHESIS_EXAMPLE",
+    "REFUTATION_BASIS_VALUES",
+    "REFUTATION_CONVENTION",
+    "REFUTATION_LINE_EXAMPLE",
     "ClassDismissal",
     "Confidence",
     "Finding",
@@ -787,9 +923,12 @@ __all__ = [
     "HypothesisDisposition",
     "HypothesisParseError",
     "HypothesisState",
+    "RefutationBasis",
     "extract_section_body",
     "parse_deferrals",
     "parse_dismissed_classes",
     "parse_hypotheses",
     "referenced_evidence_ids",
+    "refutation_problem",
+    "ungrounded_refutations",
 ]

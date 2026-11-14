@@ -32,6 +32,7 @@ from zen.tools.agents_graph.contracts import HuntReport, HuntTask, ImpactRung
 from zen.tools.agents_graph.tools import AgentRole, agent_finish, create_agent
 from zen.tools.coverage.tools import list_coverage, record_coverage
 from zen.tools.finish.tool import (
+    CLOSURE_GATE_DISPOSAL_NOTE,
     COVERAGE_GATE_DESCRIPTION,
     COVERAGE_GATE_DISPOSAL_EXAMPLE,
     finish_scan,
@@ -56,6 +57,8 @@ from zen.tools.threat_model.schema import (
     DISPOSITION_LINE_EXAMPLE,
     HYPOTHESIS_BASIS_VALUES,
     HYPOTHESIS_CONVENTION,
+    REFUTATION_CONVENTION,
+    REFUTATION_LINE_EXAMPLE,
 )
 from zen.tools.threat_model.tools import (
     _REQUIRED_SECTIONS,
@@ -324,8 +327,17 @@ def _recon_requirements() -> list[ContractRequirement]:
             key="disposition",
             group="gates",
             text=(
-                f"{DISPOSITION_CONVENTION} A hypothesis left open or blocked with no disposition "
-                f"blocks the scan from finishing and is named (`{DISPOSITION_LINE_EXAMPLE}`)."
+                f"{DISPOSITION_CONVENTION} A hypothesis left open, blocked or testing with no "
+                "disposition blocks the scan from finishing and is named "
+                f"(`{DISPOSITION_LINE_EXAMPLE}`)."
+            ),
+        ),
+        ContractRequirement(
+            key="refutation_basis",
+            group="gates",
+            text=(
+                f"{REFUTATION_CONVENTION} The save rejects a `refuted` hypothesis that states "
+                f"no grounds, naming every one (`{REFUTATION_LINE_EXAMPLE}`)."
             ),
         ),
     ]
@@ -402,9 +414,11 @@ def _root_requirements() -> list[ContractRequirement]:
             group="gates",
             text=(
                 "The closure gate on `finish_scan` refuses while any threat-model hypothesis is "
-                f"left open or blocked with no recorded disposition. {DISPOSITION_CONVENTION} "
-                "Resolve each open/blocked lead to a terminal state, give it an inline disposition "
-                f"(`{DISPOSITION_LINE_EXAMPLE}`), or defer it, before you finish."
+                "left open, blocked or testing with no recorded disposition, or refuted with no "
+                f"stated grounds. {DISPOSITION_CONVENTION} Resolve each such lead to a terminal "
+                f"state, give it an inline disposition (`{DISPOSITION_LINE_EXAMPLE}`), or defer "
+                f"it, before you finish. {REFUTATION_CONVENTION} For example: "
+                f"`{REFUTATION_LINE_EXAMPLE}`. {CLOSURE_GATE_DISPOSAL_NOTE}"
             ),
         ),
         ContractRequirement(

@@ -10,19 +10,46 @@ from typing import TYPE_CHECKING, Any
 from agents import RunContextWrapper, function_tool
 
 from zen.core.agents import coordinator_from_context
+from zen.tools.threat_model.schema import (
+    DEFERRAL_LINE_EXAMPLE,
+    DISPOSITION_CONVENTION,
+    DISPOSITION_LINE_EXAMPLE,
+    REFUTATION_CONVENTION,
+    REFUTATION_LINE_EXAMPLE,
+    parse_deferrals,
+    parse_hypotheses,
+    refutation_problem,
+)
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from zen.core.agents import AgentCoordinator
+    from zen.tools.threat_model.schema import Hypothesis
 
 
 logger = logging.getLogger(__name__)
 
 
-# Hypothesis states that leave a lead unresolved. A hypothesis in one of these
-# must carry a recorded disposition before the scan can finish; ``testing`` is in
-# progress (being handled), and ``confirmed``/``refuted`` are already terminal.
-_OPEN_HYPOTHESIS_STATES = frozenset({"open", "blocked"})
+# Hypothesis states that leave a lead unresolved at the finish boundary. A
+# hypothesis in one of these must carry a recorded disposition before the scan can
+# finish. ``testing`` is a valid state while the scan runs — the schema accepts it
+# and nothing checks it mid-run — but once the scan ends nothing is still testing
+# the lead, so here, and only here, it is read like ``open``. ``confirmed`` is
+# terminal; ``refuted`` is terminal when it states its grounds.
+_OPEN_HYPOTHESIS_STATES = frozenset({"open", "blocked", "testing"})
+
+# Why a ``refuted`` lead is listed: the label is there, the grounds are not.
+_REFUTED_WITHOUT_GROUNDS = "refuted without grounds"
+
+# The leads the runtime publishes itself in a forced wind-down, by the reason
+# each is undisposed. There a rejection can cost the scan its report. What the
+# runtime writes is the state the model records and the fact that no disposition
+# was recorded — it knows nothing about what was tested, and says nothing about it.
+_RUNTIME_RECORDED_REASONS = frozenset({*_OPEN_HYPOTHESIS_STATES, _REFUTED_WITHOUT_GROUNDS})
+
+_LEAD_RISK_AREA = "hypothesis with no recorded disposition"
 
 
 # ── coverage gate: its teaching text, defined once ───────────────────────────
@@ -64,40 +91,83 @@ _COVERAGE_GATE_TEACHING = (
 _SYSTEM_RECORDER = "system"
 
 
-def _undisposed_open_hypotheses(content: str) -> list[str]:
-    """Ids of open/blocked hypotheses in one model with no recorded disposition.
+# ── closure gate: its teaching text, defined once ────────────────────────────
+#
+# The ``finish_scan`` description, the generated root CONTRACT and the gate's own
+# rejection read the same constants: the disposition and refutation conventions
+# from the hypothesis schema, and this note on where a disposal is written.
 
-    A hypothesis counts as disposed when any one of these holds:
+CLOSURE_GATE_DISPOSAL_NOTE = (
+    "Dispositions and refutation grounds are read from the saved model only: change them by "
+    "re-saving it with `save_threat_model` — an amendment does not dispose a lead. When no "
+    "user is attached and the runtime tells you to finish immediately, call `finish_scan` "
+    "without re-saving: the runtime publishes, under its own name, the state the model records "
+    "for each lead that still has no disposition. It changes no lead and marks none refuted."
+)
+"""Where a disposal is written, and what the runtime does in a forced wind-down."""
 
-    * it is in a terminal state (``confirmed``/``refuted``) — then it is not
-      open/blocked in the first place;
-    * it carries an inline ``disposition`` on its own hypothesis line — the
-      low-friction channel (``deferred`` / ``accepted_risk`` / ``out_of_scope`` /
-      ``resolved_elsewhere``, validated by :class:`~zen.tools.threat_model.schema.Hypothesis`); or
-    * a ``## Deferred Hypotheses`` record names its id — the dedicated channel.
+_CLOSURE_GATE_MARKER = "{closure_gate}"
+_CLOSURE_GATE_TEACHING = (
+    f"{DISPOSITION_CONVENTION} An inline disposition reads `{DISPOSITION_LINE_EXAMPLE}`; a "
+    f"deferral record under a 'Deferred Hypotheses' section reads `{DEFERRAL_LINE_EXAMPLE}`. "
+    f"{REFUTATION_CONVENTION} For example: `{REFUTATION_LINE_EXAMPLE}`. "
+    f"{CLOSURE_GATE_DISPOSAL_NOTE}"
+)
 
-    Anything left open or blocked with none of these is an undisposed lead and is
-    returned by id. Both disposition channels are read from the same schema
-    definitions the save validates against, so the gate accepts exactly what the
-    schema lets a hypothesis express — the fix for the save/finish deadlock where
-    the gate demanded a disposition the schema forbade recording.
+
+def _undisposed_reason(hypothesis: Hypothesis) -> str | None:
+    """Why a lead is unresolved at the finish boundary, before dispositions are read.
+
+    ``open``, ``blocked`` and ``testing`` are unresolved states; ``testing`` only
+    counts here, at the end of the scan. A ``refuted`` hypothesis that does not
+    state its grounds is a label rather than a resolution, by the rule the save
+    gate enforces — read here too so a lead that reached the store without passing
+    that gate (saved before the rule existed, replayed from the event log, hydrated
+    from the mirror) is named instead of waved through.
     """
-    from zen.tools.threat_model.schema import parse_deferrals, parse_hypotheses
+    if hypothesis.state in _OPEN_HYPOTHESIS_STATES:
+        return str(hypothesis.state)
+    if refutation_problem(hypothesis) is not None:
+        return _REFUTED_WITHOUT_GROUNDS
+    return None
 
-    hypotheses, _ = parse_hypotheses(content)
-    deferrals, _ = parse_deferrals(content)
-    deferred = {deferral.hypothesis_id for deferral in deferrals}
+
+def _undisposed_leads(
+    hypotheses: Iterable[Hypothesis], deferred: set[str]
+) -> list[dict[str, str]]:
+    """Unresolved leads with no recorded disposition, each with why it is listed."""
     return [
-        h.id
-        for h in hypotheses
-        if h.state in _OPEN_HYPOTHESIS_STATES and h.disposition is None and h.id not in deferred
+        {"id": hypothesis.id, "why": why, "vuln_class": hypothesis.vuln_class}
+        for hypothesis in hypotheses
+        if (why := _undisposed_reason(hypothesis)) is not None
+        and hypothesis.disposition is None
+        and hypothesis.id not in deferred
     ]
 
 
-def _undisposed_from_ledger(ledger: object) -> list[str]:
+def _undisposed_leads_in(content: str) -> list[dict[str, str]]:
+    """The closure gate over one model's document."""
+    hypotheses, _ = parse_hypotheses(content)
+    deferrals, _ = parse_deferrals(content)
+    return _undisposed_leads(hypotheses, {deferral.hypothesis_id for deferral in deferrals})
+
+
+def _undisposed_open_hypotheses(content: str) -> list[str]:
+    """Ids of the leads in one model the closure gate still holds open.
+
+    A hypothesis counts as disposed when any one of these holds: it is
+    ``confirmed``, or ``refuted`` with its grounds stated; it carries an inline
+    ``disposition`` on its own hypothesis line; or a ``## Deferred Hypotheses``
+    record names its id. Anything left open, blocked or testing — or refuted with
+    no grounds — with none of these is an undisposed lead, returned by id.
+    """
+    return [lead["id"] for lead in _undisposed_leads_in(content)]
+
+
+def _undisposed_from_ledger(ledger: object) -> list[dict[str, str]]:
     """The closure gate as a query over the ledger's typed hypotheses.
 
-    For each saved document, the open/blocked hypotheses are read as typed
+    For each saved document, the hypotheses are read as typed
     :class:`~zen.tools.threat_model.schema.Hypothesis` rows (their ``state`` and
     inline ``disposition`` are object fields, not re-parsed prose); the dedicated
     ``## Deferred Hypotheses`` dispositions — the other disposition channel — are
@@ -105,57 +175,134 @@ def _undisposed_from_ledger(ledger: object) -> list[str]:
     prose path: the typed rows were parsed from the same body, and the deferral
     grammar is the same.
     """
-    from zen.tools.threat_model.schema import parse_deferrals
-
-    seen: set[str] = set()
-    ordered: list[str] = []
+    leads: list[dict[str, str]] = []
     for identity in ledger.model_identities():  # type: ignore[attr-defined]
         hypotheses = ledger.get_hypotheses(identity)  # type: ignore[attr-defined]
         view = ledger.get_model_view(identity)  # type: ignore[attr-defined]
         deferrals, _ = parse_deferrals(str(view.get("content", "")) if view else "")
-        deferred = {d.hypothesis_id for d in deferrals}
-        for hypothesis in hypotheses:
-            if (
-                hypothesis.state in _OPEN_HYPOTHESIS_STATES
-                and hypothesis.disposition is None
-                and hypothesis.id not in deferred
-                and hypothesis.id not in seen
-            ):
-                seen.add(hypothesis.id)
-                ordered.append(hypothesis.id)
-    return ordered
+        leads.extend(_undisposed_leads(hypotheses, {d.hypothesis_id for d in deferrals}))
+    return leads
 
 
-def _undisposed_hypotheses_across_run() -> list[str]:
-    """Undisposed open/blocked hypothesis ids across every threat model this run holds.
+def _undisposed_leads_across_run() -> list[dict[str, str]]:
+    """Every undisposed lead across the threat models this run holds, each once.
 
     Queries the run-scoped research ledger's typed hypotheses when one is
     installed, and falls back to parsing the threat-model dict store otherwise.
-    With no model saved — the common case — there are no hypotheses and the
-    closure gate is a no-op pass.
+    With no model saved there are no hypotheses and the closure gate is a no-op.
     """
     from zen.tools.ledger.runtime import get_ledger
 
     ledger = get_ledger()
     if ledger is not None and ledger.has_models():
-        return _undisposed_from_ledger(ledger)
+        found = _undisposed_from_ledger(ledger)
+    else:
+        from zen.tools.threat_model.tools import _MODELS, _store_lock
 
-    from zen.tools.threat_model.tools import _MODELS, _store_lock
-
-    with _store_lock:
-        contents = [
-            str(model.get("content", ""))
-            for model in _MODELS.values()
-            if isinstance(model, dict)
-        ]
+        with _store_lock:
+            contents = [
+                str(model.get("content", ""))
+                for model in _MODELS.values()
+                if isinstance(model, dict)
+            ]
+        found = [lead for content in contents for lead in _undisposed_leads_in(content)]
     seen: set[str] = set()
-    ordered: list[str] = []
-    for content in contents:
-        for hypothesis_id in _undisposed_open_hypotheses(content):
-            if hypothesis_id not in seen:
-                seen.add(hypothesis_id)
-                ordered.append(hypothesis_id)
+    ordered: list[dict[str, str]] = []
+    for lead in found:
+        if lead["id"] not in seen:
+            seen.add(lead["id"])
+            ordered.append(lead)
     return ordered
+
+
+def _undisposed_hypotheses_across_run(leads: list[dict[str, str]] | None = None) -> list[str]:
+    """Undisposed hypothesis ids across every threat model this run holds.
+
+    Given the leads one evaluation already found, names those; otherwise evaluates.
+    """
+    found = _undisposed_leads_across_run() if leads is None else leads
+    return [lead["id"] for lead in found]
+
+
+def _split_for_wind_down(
+    leads: list[dict[str, str]], wind_down: str | None
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Split undisposed leads into those that block and those the runtime records."""
+    if not wind_down:
+        return leads, []
+    runtime = [lead for lead in leads if lead["why"] in _RUNTIME_RECORDED_REASONS]
+    blocking = [lead for lead in leads if lead["why"] not in _RUNTIME_RECORDED_REASONS]
+    return blocking, runtime
+
+
+def _closure_rejection(leads: list[dict[str, str]]) -> dict[str, Any]:
+    """The closure gate's rejection: every undisposed lead at once, and how to dispose each."""
+    named = ", ".join(f"{lead['id']} ({lead['why']})" for lead in leads)
+    return {
+        "success": False,
+        "scan_completed": False,
+        "error": (
+            "Closure gate: the scan cannot finish while these threat-model hypotheses are "
+            "undisposed — open, blocked or testing with no recorded disposition, or refuted "
+            f"with no stated grounds: {named}. {_CLOSURE_GATE_TEACHING} A lead is disposed of, "
+            "never dropped silently."
+        ),
+        "undisposed_hypotheses": [lead["id"] for lead in leads],
+        "undisposed_reasons": {lead["id"]: lead["why"] for lead in leads},
+    }
+
+
+def _record_undisposed_leads(leads: list[dict[str, str]], wind_down: str | None) -> list[str]:
+    """Publish each lead the scan is winding down on, attributed to the runtime.
+
+    Only in a forced wind-down. The runtime writes one open coverage entry per
+    lead saying what it knows and nothing else: the state the saved model records
+    for the lead, that no disposition was recorded, and that the model was not
+    re-saved before the scan finished. Leads are labelled at the end of a scan, so
+    a lead still ``open`` in the model may well have been tested, reported or
+    ruled out — the row makes no claim either way. It never touches the model.
+    Best-effort: a row that cannot be written is logged and the scan still
+    finalizes; a row already there from an earlier attempt counts as recorded.
+    """
+    recorded: list[str] = []
+    if not leads or not wind_down:
+        return recorded
+    try:
+        from zen.tools.coverage.tools import _record_impl
+
+        for lead in leads:
+            lead_id = lead["id"]
+            named_class = f" (class: {lead['vuln_class']})" if lead["vuln_class"] else ""
+            state = (
+                "`refuted` with no stated grounds"
+                if lead["why"] == _REFUTED_WITHOUT_GROUNDS
+                else f"`{lead['why']}`"
+            )
+            outcome = _record_impl(
+                surface=f"Threat-model lead {lead_id}",
+                risk_area=_LEAD_RISK_AREA,
+                outcome="needs_follow_up",
+                evidence=(
+                    f"Recorded by the runtime at finish because {wind_down}: the saved threat "
+                    f"model records hypothesis {lead_id}{named_class} as {state}, with no "
+                    "disposition, and the model was not re-saved before the scan finished. "
+                    "This reports the model's record only: the runtime did not assess the lead."
+                ),
+                agent_id=None,
+                agent_name=_SYSTEM_RECORDER,
+                source="runtime",
+            )
+            if outcome.get("success") or outcome.get("existing_entry_id"):
+                recorded.append(lead_id)
+            else:
+                logger.warning(
+                    "undisposed lead %s was not recorded at finish: %s",
+                    lead_id,
+                    outcome.get("error"),
+                )
+    except Exception:
+        logger.exception("could not record undisposed leads at finish; finalizing anyway")
+    return recorded
 
 
 def _unrecorded_classes(agent_graph: dict[str, Any]) -> list[dict[str, Any]]:
@@ -295,12 +442,15 @@ def _do_finish(  # noqa: PLR0911
     if errors:
         return {"success": False, "error": "Validation failed", "errors": errors}
 
-    # Closure gate: no lead may be left open or blocked without a recorded
-    # disposition. A hypothesis is disposed by reaching a terminal state in the
-    # model (confirmed/refuted) or by an explicit deferral carrying it forward;
-    # anything else blocks finishing, so a dropped lead is structurally impossible
-    # to leave unrecorded.
-    undisposed = _undisposed_hypotheses_across_run()
+    # Closure gate: no lead may be left undisposed. A hypothesis is disposed by
+    # reaching a terminal state in the model (confirmed, or refuted with its
+    # grounds stated), by an inline disposition, or by an explicit deferral;
+    # anything else blocks finishing. In a forced wind-down the leads the runtime
+    # may record itself do not block — it publishes them as open further down,
+    # because a rejected finish there can cost the scan its report.
+    leads = _undisposed_leads_across_run()
+    blocking_leads, runtime_leads = _split_for_wind_down(leads, wind_down)
+    undisposed = _undisposed_hypotheses_across_run(blocking_leads)
     # Coverage gate, evaluated here — before anything is persisted or marked
     # complete — so a class nobody accounted for is still something the root agent
     # can act on, not a warning attached to a scan that has already ended. In a
@@ -309,26 +459,8 @@ def _do_finish(  # noqa: PLR0911
     unrecorded = _unrecorded_classes(agent_graph)
     blocking: list[dict[str, Any]] = [] if wind_down else unrecorded
     if undisposed:
-        from zen.tools.threat_model.schema import (
-            DEFERRAL_LINE_EXAMPLE,
-            DISPOSITION_LINE_EXAMPLE,
-        )
-
-        logger.debug("finish_scan rejected — undisposed open/blocked hypotheses: %s", undisposed)
-        rejection: dict[str, Any] = {
-            "success": False,
-            "scan_completed": False,
-            "error": (
-                "Closure gate: the scan cannot finish while these threat-model hypotheses are "
-                f"still open or blocked with no recorded disposition: {', '.join(undisposed)}. "
-                "Dispose of each — resolve it to a terminal state (confirmed or refuted) in the "
-                "model, record an inline disposition on its hypothesis line "
-                f"(`{DISPOSITION_LINE_EXAMPLE}`), or carry it forward under a 'Deferred "
-                f"Hypotheses' section (`{DEFERRAL_LINE_EXAMPLE}`). A lead is disposed of, never "
-                "dropped silently."
-            ),
-            "undisposed_hypotheses": undisposed,
-        }
+        logger.debug("finish_scan rejected — undisposed hypotheses: %s", undisposed)
+        rejection = _closure_rejection(blocking_leads)
         # One rejection names both problems, so both are fixable in one turn.
         rejection.update(_coverage_rejection(blocking, error_key="coverage_error"))
         return rejection
@@ -343,7 +475,8 @@ def _do_finish(  # noqa: PLR0911
     # Nothing blocks. Everything coverage-related is settled before the first
     # persistence side effect, and none of it can fail the finish.
     system_recorded = _record_unexamined(unrecorded, wind_down)
-    coverage_summary = _advisory_coverage_summary(agent_graph, system_recorded)
+    system_undisposed = _record_undisposed_leads(runtime_leads, wind_down)
+    coverage_summary = _advisory_coverage_summary(agent_graph, system_recorded, system_undisposed)
 
     try:
         from zen.report.state import get_global_report_state
@@ -383,7 +516,7 @@ def _do_finish(  # noqa: PLR0911
 
 
 def _advisory_coverage_summary(
-    agent_graph: dict[str, Any], system_recorded: list[str]
+    agent_graph: dict[str, Any], system_recorded: list[str], system_undisposed: list[str]
 ) -> dict[str, Any]:
     """The advisory summary, computed before persistence and never fatal to it."""
     try:
@@ -393,6 +526,8 @@ def _advisory_coverage_summary(
         summary = {}
     if system_recorded:
         summary["system_recorded_unexamined"] = system_recorded
+    if system_undisposed:
+        summary["system_recorded_undisposed"] = system_undisposed
     return summary
 
 
@@ -542,17 +677,10 @@ async def finish_scan(
        record it as ``needs_follow_up`` before finishing. The response
        from this tool reports coverage counts and any unresolved rows.
     6. **Hypothesis disposition (closure gate).** Every threat-model
-       hypothesis still ``open`` or ``blocked`` must be disposed of
-       before finishing, in any one of three ways: resolved to a
-       terminal state (``confirmed`` / ``refuted``) in the model; marked
-       with an inline ``disposition:`` field on its own hypothesis line
-       (one of ``deferred`` / ``accepted_risk`` / ``out_of_scope`` /
-       ``resolved_elsewhere``, optionally a ``disposition_reason:``); or
-       carried forward under a ``## Deferred Hypotheses`` section
-       (``- hypothesis_id: <id> | reason: <why it is carried forward>``).
-       A lead you could neither confirm nor rule out is disposed of, not
-       dropped — ``finish_scan`` refuses while any undisposed open or
-       blocked hypothesis remains, naming it.
+       hypothesis must be disposed of before finishing; ``finish_scan``
+       refuses while any is undisposed — ``open``, ``blocked`` or
+       ``testing`` with no recorded disposition, or ``refuted`` with no
+       stated grounds — naming each and why. {closure_gate}
     7. **Coverage accounting (coverage gate).** {coverage_gate}
 
     **Calling this multiple times overwrites the previous report.**
@@ -710,4 +838,7 @@ async def finish_scan(
 # description the model reads cannot drift from the gate that enforces it.
 finish_scan.description = finish_scan.description.replace(
     _COVERAGE_GATE_MARKER, _COVERAGE_GATE_TEACHING
+)
+finish_scan.description = finish_scan.description.replace(
+    _CLOSURE_GATE_MARKER, _CLOSURE_GATE_TEACHING
 )
