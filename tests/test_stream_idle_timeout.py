@@ -13,7 +13,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar, override
 
 import pytest
 from agents.model_settings import ModelSettings
@@ -21,7 +21,7 @@ from agents.models.interface import Model, ModelTracing
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 
-from zen.config import loader
+from zen.config import loader, models
 from zen.config.loader import load_settings
 from zen.config.models import ZenProvider, _TurnGuardModel, _with_idle_timeout
 
@@ -133,6 +133,8 @@ async def test_events_keep_flowing_while_the_stream_is_alive() -> None:
 def _reset_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for key in ("ZEN_LLM", "LLM_DISABLE_STREAMING", "LLM_STREAM_IDLE_TIMEOUT"):
         monkeypatch.delenv(key, raising=False)
+    # No endpoint on this machine is asked: the limit under test is the configured one.
+    monkeypatch.setattr(models, "_bridge_turn_bound", lambda _base_url: None)
     monkeypatch.setattr(loader, "_cached", None)
     monkeypatch.setattr(loader, "_override", None)
     yield
@@ -171,3 +173,115 @@ def test_idle_timeout_is_off_without_streaming(
     model = ZenProvider().get_model("openai/gpt-4o-mini")
     assert isinstance(model, _TurnGuardModel)
     assert model._stream_idle_timeout == 0
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    """Answers a health check with whatever the test set."""
+
+    status: ClassVar[int] = 200
+    body: ClassVar[bytes] = b"{}"
+
+    @override
+    def log_message(self, *args: Any) -> None:
+        """Keep the test output quiet."""
+
+    def do_GET(self) -> None:
+        self.send_response(type(self).status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(type(self).body)))
+        self.end_headers()
+        self.wfile.write(type(self).body)
+
+
+@pytest.fixture
+def local_endpoint(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    monkeypatch.setattr(models, "_BRIDGE_TURN_BOUNDS", {})
+    server = HTTPServer(("127.0.0.1", 0), _HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/v1"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _declares(monkeypatch: pytest.MonkeyPatch, health: Any, *, status: int = 200) -> None:
+    monkeypatch.setattr(_HealthHandler, "status", status)
+    monkeypatch.setattr(_HealthHandler, "body", json.dumps(health).encode())
+
+
+def test_a_local_bridge_is_known_by_the_turn_bound_its_health_reply_declares(
+    local_endpoint: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _declares(monkeypatch, {"status": "ok", "turn_timeout_s": 1800.0})
+
+    assert models._idle_limit_for_endpoint(45.0, local_endpoint) == 1860.0
+
+
+@pytest.mark.parametrize(
+    ("health", "status"),
+    [
+        ({"status": "ok"}, 200),
+        ({"status": "ok", "turn_timeout_s": "soon"}, 200),
+        ({"status": "ok", "turn_timeout_s": True}, 200),
+        ({"status": "ok", "turn_timeout_s": 0}, 200),
+        ({"status": "ok", "turn_timeout_s": float("inf")}, 200),
+        ({"status": "ok", "turn_timeout_s": 10**400}, 200),
+        ({"error": "not found"}, 404),
+    ],
+)
+def test_a_local_endpoint_that_declares_no_usable_turn_bound_keeps_its_idle_limit(
+    local_endpoint: str, monkeypatch: pytest.MonkeyPatch, health: Any, status: int
+) -> None:
+    _declares(monkeypatch, health, status=status)
+
+    assert models._idle_limit_for_endpoint(45.0, local_endpoint) == 45.0
+
+
+def test_an_endpoint_on_another_machine_is_not_asked_and_keeps_its_idle_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def asked(address: str) -> float | None:
+        raise AssertionError(f"asked {address}")
+
+    monkeypatch.setattr(models, "_BRIDGE_TURN_BOUNDS", {})
+    monkeypatch.setattr(models, "_ask_bridge", asked)
+
+    assert models._idle_limit_for_endpoint(45.0, "https://models.example.com/v1") == 45.0
+
+
+@pytest.mark.parametrize("base_url", ["http://localhost:not-a-port/v1", "http://[::1/v1"])
+def test_a_local_address_that_cannot_be_asked_keeps_its_idle_limit(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+) -> None:
+    monkeypatch.setattr(models, "_BRIDGE_TURN_BOUNDS", {})
+
+    assert models._idle_limit_for_endpoint(45.0, base_url) == 45.0
+
+
+@pytest.mark.parametrize(
+    ("limit", "bound", "expected"), [(300.0, 120.0, 300.0), (0.0, 1800.0, 0.0)]
+)
+def test_a_bridges_turn_bound_never_shortens_the_idle_limit_or_arms_it(
+    monkeypatch: pytest.MonkeyPatch, limit: float, bound: float, expected: float
+) -> None:
+    monkeypatch.setattr(models, "_bridge_turn_bound", lambda _base_url: bound)
+
+    assert models._idle_limit_for_endpoint(limit, "http://127.0.0.1:8787/v1") == expected
+
+
+@pytest.mark.usefixtures("_reset_settings")
+def test_the_idle_limit_of_a_model_served_by_a_local_bridge_waits_out_its_turn_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge = "http://127.0.0.1:8787/v1"
+    monkeypatch.setattr("zen.config.models.MultiProvider.get_model", lambda *_: _DummyModel())
+    monkeypatch.setattr(
+        models, "_bridge_turn_bound", lambda base_url: 1800.0 if base_url == bridge else None
+    )
+    monkeypatch.setenv("LLM_STREAM_IDLE_TIMEOUT", "45")
+    load_settings()
+
+    model = ZenProvider(base_url=bridge).get_model("openai/gpt-4o-mini")
+    assert isinstance(model, _TurnGuardModel)
+    assert model._stream_idle_timeout == 1860

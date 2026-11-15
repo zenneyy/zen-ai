@@ -6,9 +6,9 @@
 # inference draws on your Claude subscription instead of a metered API key.
 #
 # Usage:
-#   1. Start the bridge in one terminal:   python -m zen.bridge
-#   2. In another terminal:                source ./setup-claude-sub.sh
-#   3. Run a scan:                         zen --target ./your-app
+#   1. In each terminal you use:           source ./setup-claude-sub.sh
+#   2. Start the bridge in one of them:    python -m zen.bridge
+#   3. Run a scan in another:              zen --target ./your-app
 #
 # How it works:
 #   The bridge exposes an OpenAI-compatible endpoint and drives the Claude
@@ -40,8 +40,11 @@ export ZEN_REASONING_EFFORT="${REASONING}"
 export ZEN_BRIDGE_EFFORT="${ZEN_BRIDGE_EFFORT:-high}"
 
 # High effort + deep scan mode produce genuinely long single turns (exhaustive
-# recon across a whole repo, then chained exploitation). Give the bridge room so
-# a slow-but-healthy turn isn't killed mid-flight and reported as a failure.
+# recon across a whole repo, then chained exploitation). ZEN_BRIDGE_TURN_TIMEOUT_S
+# is how long the bridge lets one turn run before it ends the turn with an error.
+# The bridge reads it from its own environment, so source this file in the
+# bridge's terminal too. Zen does not read it: it asks the bridge, and then does
+# not give up on a silent turn before the bridge does.
 export ZEN_BRIDGE_TURN_TIMEOUT_S="${ZEN_BRIDGE_TURN_TIMEOUT_S:-1800}"
 export ZEN_BRIDGE_IDLE_TIMEOUT_S="${ZEN_BRIDGE_IDLE_TIMEOUT_S:-5400}"
 

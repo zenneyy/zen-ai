@@ -31,6 +31,14 @@ Configure Zen using environment variables or a config file.
   Request timeout in seconds for LLM calls.
 </ParamField>
 
+<ParamField path="LLM_STREAM_IDLE_TIMEOUT" default="300" type="integer">
+  Longest gap, in seconds, between two events of a streamed reply before the turn is abandoned and retried. `0` turns the check off. For a model served by a Zen bridge on the same machine, the limit is never shorter than the bridge's turn bound plus 60 seconds.
+</ParamField>
+
+<ParamField path="ZEN_BRIDGE_TURN_TIMEOUT_S" default="1800" type="integer">
+  Claude bridge only. How long the bridge lets one model turn run before it ends the turn with an error. Set it in the bridge's environment. Zen does not read it: it asks a bridge on its own machine for the bound.
+</ParamField>
+
 <ParamField path="ZEN_LLM_MAX_RETRIES" default="5" type="integer">
   Maximum number of retries for LLM API calls on transient failures.
 </ParamField>

@@ -6,11 +6,14 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import math
 import os
 import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlsplit
 
+import httpx
 from agents import (
     set_default_openai_api,
     set_default_openai_key,
@@ -468,6 +471,67 @@ class _CredentialedLitellmProvider(ModelProvider):
         )
 
 
+# The Claude Code bridge answers a turn in one piece: no event reaches zen while
+# the model works, so the gap the stream-idle limit measures is the whole turn.
+# The bridge bounds a turn itself and says so in its health reply. Zen asks only
+# an endpoint on its own machine, and only a reply that declares a turn bound
+# makes that endpoint a bridge; for every other endpoint the limit is
+# LLM_STREAM_IDLE_TIMEOUT alone. The margin lets the bridge's own answer to a
+# turn that ran out arrive before zen gives up on the stream.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_BRIDGE_PROBE_TIMEOUT_S = 2.0
+_BRIDGE_TURN_BOUND_MARGIN_S = 60.0
+_BRIDGE_TURN_BOUNDS: dict[str, float | None] = {}
+
+
+def _ask_bridge(address: str) -> float | None:
+    """The turn bound the health reply at ``address`` declares, if it declares one."""
+    try:
+        reply = httpx.get(f"{address}/health", timeout=_BRIDGE_PROBE_TIMEOUT_S)
+        reply.raise_for_status()
+        declared = reply.json().get("turn_timeout_s")
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError, AttributeError):
+        return None
+    if isinstance(declared, bool) or not isinstance(declared, int | float):
+        return None
+    try:
+        bound = float(declared)
+    except OverflowError:
+        return None
+    return bound if math.isfinite(bound) and bound > 0 else None
+
+
+def _bridge_turn_bound(base_url: str | None) -> float | None:
+    """The turn bound of a zen bridge serving ``base_url``; None when it is not one.
+
+    Asked once per endpoint for the life of the process, the answer "not a
+    bridge" included.
+    """
+    try:
+        target = urlsplit(base_url or "")
+    except ValueError:
+        return None
+    if target.hostname not in _LOOPBACK_HOSTS:
+        return None
+    address = f"{target.scheme}://{target.netloc}"
+    if address not in _BRIDGE_TURN_BOUNDS:
+        _BRIDGE_TURN_BOUNDS[address] = _ask_bridge(address)
+    return _BRIDGE_TURN_BOUNDS[address]
+
+
+def _idle_limit_for_endpoint(limit: float, base_url: str | None) -> float:
+    """The stream-idle limit for a model served at ``base_url``.
+
+    Never shorter than the turn bound of a local bridge, and never armed by one.
+    """
+    if limit <= 0:
+        return limit
+    bound = _bridge_turn_bound(base_url)
+    if bound is None:
+        return limit
+    return max(limit, bound + _BRIDGE_TURN_BOUND_MARGIN_S)
+
+
 class ZenProvider(MultiProvider):
     """Route any non-OpenAI prefix through LiteLLM with the prefix preserved,
     so users type ``deepseek/deepseek-chat`` rather than
@@ -557,6 +621,9 @@ class ZenProvider(MultiProvider):
                     provider="openai",
                     base_url=self._override_base_url or llm.api_base,
                 )
+            idle_timeout = _idle_limit_for_endpoint(
+                idle_timeout, self._override_base_url or llm.api_base
+            )
             if llm.disable_streaming:
                 model = _NonStreamingModel(model)
                 # The wrapper emits its single event only once the whole request

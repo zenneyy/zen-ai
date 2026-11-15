@@ -66,6 +66,8 @@ from zen.bridge.errors import ERROR_DETAIL_MAX_CHARS, BaseBridgeError, scrub
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from claude_agent_sdk import HookContext, HookJSONOutput
 
 
@@ -80,7 +82,20 @@ _SESSION_IDLE_TIMEOUT_S = float(os.environ.get("ZEN_BRIDGE_IDLE_TIMEOUT_S", "540
 # A single model turn, including thinking. Deep scan mode at high/xhigh effort
 # produces genuinely long turns (exhaustive recon over a whole repo, chained
 # exploitation), so this needs far more headroom than a quick scan.
+# The bound is the turn's own: it runs from the request that starts the turn,
+# whatever joins it later, and the health reply declares it to zen.
 _TURN_TIMEOUT_S = float(os.environ.get("ZEN_BRIDGE_TURN_TIMEOUT_S", "1800"))
+# While a request waits on a turn that is still running, the bridge sends an
+# interim response this often. An interim response carries no outcome: the turn
+# can still be answered with a 200 or with an error status. What it gives the
+# client is bytes on the wire, which is all a request timeout can see of a turn
+# that is answered in one piece -- and a failed write tells the bridge that the
+# client has gone.
+_PROGRESS_INTERVAL_S = 15.0
+_PROGRESS_FRAME = b"HTTP/1.1 100 Continue\r\n\r\n"
+# How long close() waits for a session's loop to end before it releases the
+# calls still parked on it.
+_LOOP_END_TIMEOUT_S = 5.0
 _MCP_SERVER_NAME = "zen"
 _MCP_PREFIX = f"mcp__{_MCP_SERVER_NAME}__"
 
@@ -394,6 +409,34 @@ def _conversation_key(payload: dict[str, Any]) -> str:
     return digest.hexdigest()
 
 
+def _turn_fingerprint(messages: list[dict[str, Any]]) -> str:
+    """Identity of one request for a turn: a digest of the transcript it carries.
+
+    Zen resends the whole transcript with every request. A request it gave up on
+    and sends again carries the same transcript; a request for a later turn
+    carries a different one. The digest tells a repeat of the request in hand
+    from the request that follows it.
+    """
+    raw = json.dumps(messages, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def _opens_conversation(messages: list[dict[str, Any]]) -> bool:
+    """Whether a transcript starts a conversation: the model has not spoken in it."""
+    return not any(message.get("role") == "assistant" for message in messages)
+
+
+def _ends_in_tool_results(messages: list[dict[str, Any]]) -> bool:
+    """Whether the newest input is tool results, by the rule `_newest_turn_input` uses."""
+    for message in reversed(messages):
+        role = message.get("role")
+        if role == "assistant":
+            return False
+        if role == "tool":
+            return True
+    return False
+
+
 def _completion_envelope(model: str, turn: _Turn | None = None) -> dict[str, Any]:
     """Build the OpenAI chat-completions envelope and populate its usage block.
 
@@ -501,6 +544,34 @@ class _Turn:
     total_tokens: int = 0
 
 
+# What a session can take next, by how its last turn ended: results for the
+# calls it is parked on, or a user turn once the model has finished speaking.
+_NEXT_INPUT: dict[str, tuple[str, ...]] = {"tool": ("tool",), "text": ("user",)}
+_SESSION_ENDED = "the Claude Code session ended before the turn was complete"
+_NOT_HELD = "the bridge holds no conversation that these tool results belong to"
+# Tool results for a conversation the bridge does not hold cannot be delivered
+# by asking again, so they are refused with a status that no layer of zen retries.
+_NOT_HELD_STATUS = 410
+
+
+@dataclass
+class _TurnSlot:
+    """One model turn, as the requests for it see it.
+
+    The request that starts a turn and every request that repeats it read the
+    one reply kept here. A client that gave up and asked again is answered by
+    the turn it started, the model is not prompted a second time, and a reply
+    written to a connection that had gone can be read again.
+    """
+
+    fingerprint: str
+    # When the turn runs out of time, on the monotonic clock. It belongs to the
+    # turn: every request that joined it stops waiting at the same moment.
+    deadline: float
+    done: threading.Event = field(default_factory=threading.Event)
+    reply: _Turn | None = None
+
+
 def _usage_from_result(msg: Any) -> tuple[int, int, int, int]:
     """Return (prompt, completion, cached_read, total) from a ResultMessage.
 
@@ -578,6 +649,18 @@ def _sign_in_failure(result: Any, error_kind: str | None, text: str) -> _Turn | 
     )
 
 
+def _stream_cut_short(result: Any) -> _Turn | None:
+    """The error turn for an SDK stream that ended before the turn did.
+
+    A turn ends with a result. A stream that stops without one means the session
+    was closed under the turn or the CLI went away, and what was read up to then
+    is not a reply from the model.
+    """
+    if result is not None:
+        return None
+    return _Turn(kind="error", error=_SESSION_ENDED, code="turn_incomplete")
+
+
 def _remove_home(home: str) -> None:
     shutil.rmtree(home, ignore_errors=True)
 
@@ -646,12 +729,19 @@ class _Session:
         self.model = model
         self.effort = effort
         self.last_used = time.monotonic()
-        self._events: queue.Queue[_Turn] = queue.Queue()
+        # The turn in hand, and turns the model finished that no request has
+        # asked for yet (a second tool call issued together with the first).
+        self._slot: _TurnSlot | None = None
+        self._backlog: list[_Turn] = []
+        self._turn_lock = threading.Lock()
         # Each parked handler receives a list of SDK/MCP content blocks (text
         # and/or image), not a bare string, so an image tool result can reach
         # the model without being flattened to text.
         self._tool_results: queue.Queue[list[dict[str, Any]]] = queue.Queue()
         self._pending_calls: list[dict[str, Any]] = []
+        # Worker threads waiting on `_tool_results`: one for every call that has
+        # parked and has not yet been answered or released.
+        self._parked = 0
         self._lock = threading.Lock()
         self._closed = False
         self._drop_sink = _ImageDropSink(session_label=model[:40] or "unknown")
@@ -698,10 +788,11 @@ class _Session:
             call_id = f"call_{uuid.uuid4().hex[:24]}"
             with self._lock:
                 self._pending_calls.append({"id": call_id, "name": name, "args": args})
+                self._parked += 1
             # Hand the batch to the HTTP side and park until Zen answers.
             self._flush_pending()
             loop = asyncio.get_running_loop()
-            blocks = await loop.run_in_executor(None, self._tool_results.get)
+            blocks = await loop.run_in_executor(None, self._take_result)
             # MCP's @tool decorator rejects an empty content list; the harvest
             # path in `_newest_turn_input` always sends at least one block,
             # but we belt-and-brace it here too.
@@ -711,6 +802,14 @@ class _Session:
 
         return tool(name, description, schema)(handler)
 
+    def _take_result(self) -> list[dict[str, Any]]:
+        """Wait, in a worker thread, for the answer to one parked call."""
+        try:
+            return self._tool_results.get()
+        finally:
+            with self._lock:
+                self._parked -= 1
+
     def _flush_pending(self) -> None:
         with self._lock:
             calls, self._pending_calls = self._pending_calls, []
@@ -719,13 +818,13 @@ class _Session:
             # tell whether parallel tool-call batches land in a single flush
             # (one `bridge flush` line listing every call) or across several
             # (multiple lines inside one model turn -- a race in the parking
-            # mechanism). Paired with the backlog line in `_await_turn`.
+            # mechanism). Paired with the backlog line in `enter`.
             logger.info(
                 "bridge flush: %d call(s) %s",
                 len(calls),
                 [c["name"] for c in calls],
             )
-            self._events.put(self._vetted(_Turn(kind="tool", calls=calls)))
+            self._emit(self._vetted(_Turn(kind="tool", calls=calls)))
 
     async def _connect(
         self, system_prompt: str, tools: list[dict[str, Any]], effort: str | None
@@ -800,18 +899,24 @@ class _Session:
                     break
         except Exception as exc:
             logger.debug("session drain failed", exc_info=True)
-            self._events.put(_Turn(kind="error", error=f"{type(exc).__name__}: {exc}"))
+            self._emit(_Turn(kind="error", error=f"{type(exc).__name__}: {exc}"))
+            return
+        # Checked before anything is vetted: a stream that stopped short is
+        # answered as that, whether or not the session had reported what it holds.
+        cut_short = _stream_cut_short(result)
+        if cut_short is not None:
+            self._emit(cut_short)
             return
         refused = _sign_in_failure(result, error_kind, "".join(text).strip())
         if refused is not None:
-            self._events.put(refused)
+            self._emit(refused)
             return
         # A turn that parked on a tool call already emitted its event.
         with self._lock:
             parked = bool(self._pending_calls)
         if not parked:
             prompt_tokens, completion_tokens, cached_tokens, total_tokens = usage
-            self._events.put(
+            self._emit(
                 self._vetted(
                     _Turn(
                         kind="text",
@@ -852,7 +957,7 @@ class _Session:
         if found:
             self._breach = "Claude Code reports " + "; ".join(found)
             logger.error("bridge session refused: %s", self._breach)
-            self._events.put(self._refusal(self._breach))
+            self._emit(self._refusal(self._breach))
             return False
         self._cleared = True
         logger.info(
@@ -889,38 +994,111 @@ class _Session:
             return self._refusal("Claude Code did not report what the session holds")
         return turn
 
+    def _emit(self, turn: _Turn) -> None:
+        """Give a finished turn to the requests waiting for it, or keep it for the next."""
+        with self._turn_lock:
+            slot = self._slot
+            if slot is None or slot.reply is not None:
+                self._backlog.append(turn)
+                return
+            slot.reply = turn
+            slot.done.set()
+
     # -- public API --
 
-    def send_user(self, text: str) -> _Turn:
-        self.last_used = time.monotonic()
-        self._submit(self._client.query(text))
-        self._submit(self._drain())
-        return self._await_turn()
+    def enter(
+        self, fingerprint: str, kind: str, values: list[Any], *, opening: bool
+    ) -> _TurnSlot | None:
+        """The turn that answers this request, or None if this session cannot take it.
 
-    def send_tool_results(self, results: list[list[dict[str, Any]]]) -> _Turn:
-        self.last_used = time.monotonic()
-        for r in results:
-            self._tool_results.put(r)
-        return self._await_turn()
+        A request that repeats the request for the turn in hand joins that turn,
+        whether the turn is still running or has been answered: nothing is sent
+        to the model a second time. Any other request has to continue from where
+        the session stands -- tool results for the calls it is parked on, or a
+        user turn once the last turn has ended -- and a request that opens a
+        conversation continues nothing. A request that does neither belongs to a
+        conversation this session is not holding.
+        """
+        with self._turn_lock:
+            if self._closed:
+                return None
+            self.last_used = time.monotonic()
+            current = self._slot
+            if current is not None and current.fingerprint == fingerprint:
+                return current
+            expected: tuple[str, ...] = ("user",)
+            if current is not None:
+                if opening or current.reply is None:
+                    # Nothing continues a turn that is still running, and a
+                    # request that opens a conversation never continues one this
+                    # session already holds, however that one's last turn ended.
+                    return None
+                expected = _NEXT_INPUT.get(current.reply.kind, ())
+            if kind not in expected:
+                return None
+            backlog = len(self._backlog)
+            slot = _TurnSlot(fingerprint, time.monotonic() + _TURN_TIMEOUT_S)
+            if backlog:
+                slot.reply = self._backlog.pop(0)
+                slot.done.set()
+            self._slot = slot
+            if kind == "tool":
+                for blocks in values:
+                    self._tool_results.put(blocks)
+            else:
+                self._submit(self._client.query(values[0] if values else ""))
+                self._submit(self._drain())
+        if backlog:
+            # Instrumentation only: a backlog here means the model finished more
+            # than one turn before this request arrived -- exactly the
+            # mis-correlation signature the parking-mechanism race would
+            # produce. One line per occurrence (not one per event) so a long
+            # scan stays legible.
+            logger.info("bridge events backlog at await: %d event(s)", backlog)
+        return slot
 
-    def _await_turn(self) -> _Turn:
-        # Instrumentation only: a non-empty backlog here means a previous
-        # model turn emitted more than one `_Turn` into `_events` that the
-        # HTTP side never consumed -- exactly the mis-correlation signature
-        # the parking-mechanism race would produce. One line per occurrence
-        # (not one per event) so a long scan stays legible.
-        pending_events = self._events.qsize()
-        if pending_events:
-            logger.info("bridge events backlog at await: %d event(s)", pending_events)
-        try:
-            return self._events.get(timeout=_TURN_TIMEOUT_S)
-        except queue.Empty as exc:
-            raise BridgeError(f"model turn exceeded {_TURN_TIMEOUT_S:.0f}s") from exc
+    def await_reply(self, slot: _TurnSlot, waiting: Callable[[], None] | None = None) -> _Turn:
+        """Block until the turn is answered or has run out of time.
+
+        The time is the turn's, not the request's: a turn that runs out is
+        answered with one error for every request that joined it. ``waiting`` is
+        called each time another interval passes with the turn still running;
+        whatever it raises ends this request's wait and leaves the turn alone.
+
+        The reply is vetted again here, when it is read. A reply kept for a
+        request that joins or repeats the turn is read after it was emitted, and
+        the session may have been asked to call something else in between.
+        """
+        while True:
+            remaining = slot.deadline - time.monotonic()
+            if slot.done.wait(timeout=max(0.0, min(remaining, _PROGRESS_INTERVAL_S))):
+                break
+            if time.monotonic() >= slot.deadline:
+                with self._turn_lock:
+                    if slot.reply is None:
+                        slot.reply = _Turn(
+                            kind="error", error=f"model turn exceeded {_TURN_TIMEOUT_S:.0f}s"
+                        )
+                        slot.done.set()
+                break
+            if waiting is not None:
+                waiting()
+        reply = slot.reply
+        if reply is None:  # set together with ``done``; kept for the type checker
+            raise BridgeError(_SESSION_ENDED, code="turn_incomplete")
+        return self._vetted(reply)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        with self._turn_lock:
+            if self._closed:
+                return
+            self._closed = True
+            slot = self._slot
+            if slot is not None and slot.reply is None:
+                # Tell whoever is waiting that the turn will not be answered,
+                # rather than leave the end of the SDK stream to be read as one.
+                slot.reply = _Turn(kind="error", error=_SESSION_ENDED, code="turn_incomplete")
+                slot.done.set()
         # Clean up the temp prompt file
         if getattr(self, "_prompt_file", None) and self._prompt_file.name:
             with contextlib.suppress(OSError):
@@ -928,6 +1106,23 @@ class _Session:
         with contextlib.suppress(Exception):
             self._submit(self._client.disconnect()).result(timeout=15)
         self._loop.call_soon_threadsafe(self._loop.stop)
+        self._release_parked()
+
+    def _release_parked(self) -> None:
+        """Let the worker thread of every call still parked finish, and end it.
+
+        Only once the session's loop has ended. While it runs, whatever a parked
+        call is handed goes on to the model as that tool's result.
+        """
+        self._thread.join(timeout=_LOOP_END_TIMEOUT_S)
+        if self._thread.is_alive():
+            logger.warning("bridge session loop did not end; its parked calls stay parked")
+            return
+        with self._lock:
+            parked = self._parked
+        for _ in range(parked):
+            self._tool_results.put([])
+        self._loop.close()
 
 
 class _SessionPool:
@@ -936,6 +1131,11 @@ class _SessionPool:
     def __init__(self) -> None:
         self._sessions: dict[str, _Session] = {}
         self._lock = threading.Lock()
+
+    def find(self, key: str) -> _Session | None:
+        self._evict_idle()
+        with self._lock:
+            return self._sessions.get(key)
 
     def get_or_create(self, key: str, payload: dict[str, Any]) -> tuple[_Session, bool]:
         self._evict_idle()
@@ -964,11 +1164,16 @@ class _SessionPool:
         )
         return session, True
 
-    def drop(self, key: str) -> None:
+    def discard(self, key: str, session: _Session) -> None:
+        """Close ``session``, and forget it if it is still the one held for ``key``.
+
+        A request may be finishing with a session that has since been replaced;
+        it must not take the replacement down with it.
+        """
         with self._lock:
-            session = self._sessions.pop(key, None)
-        if session is not None:
-            session.close()
+            if self._sessions.get(key) is session:
+                del self._sessions[key]
+        session.close()
 
     def _evict_idle(self) -> None:
         now = time.monotonic()
@@ -1085,7 +1290,45 @@ def _finalize_tool_blocks(
             tool_blocks[i] = [{"type": "text", "text": ""}]
 
 
-def handle_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
+def _enter(session: _Session, fingerprint: str, messages: list[dict[str, Any]]) -> _TurnSlot | None:
+    kind, values = _newest_turn_input(messages, drop_sink=session._drop_sink)
+    return session.enter(fingerprint, kind, values, opening=_opens_conversation(messages))
+
+
+def _turn_for(key: str, payload: dict[str, Any]) -> tuple[_Session, _TurnSlot]:
+    """The session and the turn that answer this request.
+
+    A session is a cache of a conversation zen holds in full. When a request
+    neither repeats nor continues the session's turn, the two have parted ways
+    -- most often because an earlier run that sent the same opening left its
+    session behind. Queueing the request behind that session's turn would leave
+    it waiting on a conversation that is not its own, so the session is closed
+    and the request is served from a new one.
+    """
+    messages = payload.get("messages") or []
+    fingerprint = _turn_fingerprint(messages)
+    session = _POOL.find(key)
+    if session is not None:
+        slot = _enter(session, fingerprint, messages)
+        if slot is not None:
+            return session, slot
+        logger.warning("bridge session key=%s does not match the request; replacing it", key[:12])
+        _POOL.discard(key, session)
+    if _ends_in_tool_results(messages):
+        # A new session has no call parked for these results to answer.
+        raise BridgeError(_NOT_HELD, status=_NOT_HELD_STATUS, code="conversation_not_held")
+    session, _ = _POOL.get_or_create(key, payload)
+    slot = _enter(session, fingerprint, messages)
+    if slot is None:
+        raise BridgeError(
+            "another request has taken this conversation", code="conversation_contended"
+        )
+    return session, slot
+
+
+def handle_chat_completion(
+    payload: dict[str, Any], *, waiting: Callable[[], None] | None = None
+) -> dict[str, Any]:
     model = str(payload.get("model") or "")
     if not model:
         raise BridgeError("request is missing a 'model' -- set ZEN_LLM")
@@ -1094,20 +1337,11 @@ def handle_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
         raise BridgeError("request is missing 'messages'")
 
     key = _conversation_key(payload)
-    session, is_new = _POOL.get_or_create(key, payload)
-    kind, values = _newest_turn_input(messages, drop_sink=session._drop_sink)
-
-    try:
-        if kind == "tool" and not is_new:
-            turn = session.send_tool_results(values)
-        else:
-            turn = session.send_user(values[0] if values else "")
-    except BridgeError:
-        _POOL.drop(key)
-        raise
+    session, slot = _turn_for(key, payload)
+    turn = session.await_reply(slot, waiting)
 
     if turn.kind == "error":
-        _POOL.drop(key)
+        _POOL.discard(key, session)
         if turn.status:
             raise BridgeError(
                 turn.error,
@@ -1115,10 +1349,14 @@ def handle_chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
                 error_type=turn.error_type,
                 code=turn.code or None,
             )
-        raise BridgeError(turn.error)
+        raise BridgeError(turn.error, code=turn.code or None)
     if turn.kind == "tool":
         return _as_tool_calls_response(model, turn.calls, turn)
     return _as_text_response(model, turn.text, turn)
+
+
+class _ClientGoneError(Exception):
+    """The client closed its connection while its request was waiting on a turn."""
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1164,12 +1402,22 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
+    def _still_working(self) -> None:
+        """Tell a waiting client its turn is still running, without answering it yet."""
+        try:
+            self.wfile.write(_PROGRESS_FRAME)
+            self.wfile.flush()
+        except OSError as exc:
+            raise _ClientGoneError from exc
+
     def do_GET(self) -> None:
         if self.path.rstrip("/") in ("/v1/models", "/models"):
             self._send_json(200, {"object": "list", "data": []})
             return
         if self.path.rstrip("/") == "/health":
-            self._send_json(200, {"status": "ok"})
+            # zen asks a bridge on its own machine how long it lets a turn run,
+            # so that it does not give up on a silent stream before the bridge does.
+            self._send_json(200, {"status": "ok", "turn_timeout_s": _TURN_TIMEOUT_S})
             return
         self._send_json(404, {"error": {"message": "not found"}})
 
@@ -1185,7 +1433,12 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            body = handle_chat_completion(payload)
+            body = handle_chat_completion(payload, waiting=self._still_working)
+        except _ClientGoneError:
+            # Nobody is left to answer. The turn runs on, and a request that
+            # repeats this one joins it.
+            logger.info("bridge client went away while its turn was running")
+            return
         except BridgeError as exc:
             logger.warning("bridge request failed with HTTP %d: %s", exc.status, exc)
             self._send_json(exc.status, exc.body())
