@@ -582,10 +582,24 @@ class ZenProvider(MultiProvider):
             return self._get_fallback_provider("litellm"), f"ollama_chat/{stripped_model_name}"
         return self._get_fallback_provider("litellm"), original_model_name
 
+    def endpoint(self, llm: LlmSettings) -> str | None:
+        """Where this provider sends a model's requests: its own override, else the
+        configured base. A subscription model is sent to its own backend instead."""
+        return self._override_base_url or llm.api_base
+
+    def stream_idle_limit(self, model_name: str | None, llm: LlmSettings) -> float:
+        """The stream-idle limit a model's turns run under; 0 means none."""
+        limit = float(llm.stream_idle_timeout)
+        if codex.subscription_model(model_name):
+            return limit
+        limit = _idle_limit_for_endpoint(limit, self.endpoint(llm))
+        # A non-streaming model emits its single event only once the whole request
+        # is done, so an idle gap is meaningless there; the request timeout bounds it.
+        return 0.0 if llm.disable_streaming else limit
+
     def get_model(self, model_name: str | None) -> Model:
         llm = load_settings().llm
         slug = codex.subscription_model(model_name)
-        idle_timeout = float(llm.stream_idle_timeout)
         if slug:
             # The ChatGPT subscription backend is always streamed; it has no
             # non-streaming mode to fall back to, so LLM_DISABLE_STREAMING
@@ -601,6 +615,7 @@ class ZenProvider(MultiProvider):
                 base_url=None,
             )
         else:
+            endpoint = self.endpoint(llm)
             model = super().get_model(model_name)
             resolved_name = model_name or llm.model or "unknown"
             if _routes_via_litellm(model):
@@ -610,7 +625,7 @@ class ZenProvider(MultiProvider):
                     model,
                     model_name=resolved_name,
                     provider=_litellm_provider(resolved_name),
-                    base_url=self._override_base_url or llm.api_base,
+                    base_url=endpoint,
                     route="litellm",
                     abandoned_only=True,
                 )
@@ -619,21 +634,14 @@ class ZenProvider(MultiProvider):
                     model,
                     model_name=resolved_name,
                     provider="openai",
-                    base_url=self._override_base_url or llm.api_base,
+                    base_url=endpoint,
                 )
-            idle_timeout = _idle_limit_for_endpoint(
-                idle_timeout, self._override_base_url or llm.api_base
-            )
             if llm.disable_streaming:
                 model = _NonStreamingModel(model)
-                # The wrapper emits its single event only once the whole request
-                # is done, so an idle gap is meaningless here; the request
-                # timeout bounds it instead.
-                idle_timeout = 0.0
         return _TurnGuardModel(
             model,
             max_tool_calls_per_turn=llm.max_tool_calls_per_turn,
-            stream_idle_timeout=idle_timeout,
+            stream_idle_timeout=self.stream_idle_limit(model_name, llm),
         )
 
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
+from zen.core import provenance
 from zen.tools.ledger.runtime import set_ledger
 
 
@@ -90,3 +91,36 @@ def _isolate_research_ledger() -> Iterator[None]:
         yield
     finally:
         set_ledger(None)
+
+
+def _no_health_reply(url: str) -> NoReturn:
+    raise ConnectionRefusedError(f"no endpoint is asked during tests: {url}")
+
+
+@pytest.fixture
+def production_provenance_defaults() -> None:
+    """Requested by a test that must see provenance's defaults as a scan does; the
+    isolation fixture below then leaves them alone."""
+
+
+@pytest.fixture(autouse=True)
+def _isolate_run_provenance(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Keep a scan a test starts from reading the developer's checkout or endpoint.
+
+    Run provenance reads the git checkout zen is imported from and asks a local
+    model endpoint for its health reply. Every test gets a package path that is
+    not a checkout and a health reply that never connects; a test about
+    provenance sets its own after this fixture, and a test that requests
+    ``production_provenance_defaults`` keeps the defaults a scan uses. The runner's
+    own reference to provenance is never replaced, here or in any test.
+    """
+    if "production_provenance_defaults" in request.fixturenames:
+        return
+    monkeypatch.setattr(
+        provenance, "DEFAULT_PACKAGE_DIR", tmp_path_factory.getbasetemp() / "no-checkout" / "zen"
+    )
+    monkeypatch.setattr(provenance, "DEFAULT_FETCH_HEALTH", _no_health_reply)

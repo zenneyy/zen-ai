@@ -20,6 +20,8 @@ from zen.core.paths import run_record_path
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from pygments.lexer import Lexer
 
 logger = logging.getLogger(__name__)
@@ -136,13 +138,52 @@ def write_run_record(run_dir: Path, run_record: dict[str, Any]) -> None:
     )
 
 
-def write_executive_report(run_dir: Path, final_scan_result: str) -> None:
+def write_executive_report(
+    run_dir: Path,
+    final_scan_result: str,
+    *,
+    provenance: Sequence[Mapping[str, Any]] = (),
+) -> None:
     path = run_dir / "penetration_test_report.md"
     with path.open("w", encoding="utf-8") as f:
         f.write("# Security Penetration Test Report\n\n")
         f.write(f"**Generated:** {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n")
+        f.writelines(f"{line}\n\n" for line in provenance_header_lines(provenance))
         f.write(f"{final_scan_result}\n")
     logger.info("Saved final penetration test report to: %s", path)
+
+
+def provenance_references(run_record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The provenance records run.json names, one per start of the run, oldest first."""
+    stored = run_record.get("provenance")
+    if not isinstance(stored, list):
+        return []
+    return [dict(reference) for reference in stored if isinstance(reference, dict)]
+
+
+def provenance_header_lines(references: Sequence[Mapping[str, Any]]) -> list[str]:
+    """One plain line per start: the commit, and whether that start had local changes."""
+    return [_provenance_line(reference) for reference in references]
+
+
+def _provenance_line(reference: Mapping[str, Any]) -> str:
+    label = "Source (resumed run)" if reference.get("kind") == "resume" else "Source"
+    commit = reference.get("zen_commit")
+    where = (
+        f"zen at commit {commit[:12]}"
+        if isinstance(commit, str) and commit
+        else "zen at an unknown commit"
+    )
+    modified = reference.get("modified_tracked_files")
+    untracked = reference.get("untracked_code_paths")
+    if not (isinstance(modified, int) and isinstance(untracked, int)):
+        return f"**{label}:** {where}, local changes unknown."
+    if modified == 0 and untracked == 0:
+        return f"**{label}:** {where}, no local changes."
+    return (
+        f"**{label}:** {where}, started with local changes: "
+        f"{modified} modified tracked file(s), {untracked} untracked code path(s)."
+    )
 
 
 def write_vulnerabilities(

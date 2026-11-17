@@ -17,6 +17,7 @@ from zen.report.coverage import write_coverage
 from zen.report.pricing import resolve_litellm_model
 from zen.report.sarif import write_sarif
 from zen.report.writer import (
+    provenance_references,
     read_run_record,
     write_executive_report,
     write_run_record,
@@ -735,6 +736,16 @@ class ReportState:
         self.run_record["mcp_connection_status"] = status
         self.save_run_data()
 
+    def record_provenance(self, reference: dict[str, Any]) -> None:
+        """Name one start's provenance record in run.json, and persist it.
+
+        The record itself is written once by :mod:`zen.core.provenance` and never
+        rewritten. run.json keeps its file name, digest and a short summary, which
+        the report header and the coverage export cite; a resumed run adds one.
+        """
+        self.run_record["provenance"] = [*provenance_references(self.run_record), reference]
+        self.save_run_data()
+
     def set_scan_config(self, config: dict[str, Any]) -> None:
         self.scan_config = config
         self.run_record["status"] = "running"
@@ -837,7 +848,11 @@ class ReportState:
                 logger.exception("coverage.json write failed (non-fatal)")
 
         if self.final_scan_result:
-            write_executive_report(run_dir, self.final_scan_result)
+            write_executive_report(
+                run_dir,
+                self.final_scan_result,
+                provenance=provenance_references(self.run_record),
+            )
 
         # An index is written for an empty list too once a report was
         # deleted, or the CSV/JSON on disk would still list it.

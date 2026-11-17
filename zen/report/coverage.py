@@ -32,7 +32,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from zen.report.writer import atomic_write_text
+from zen.report.writer import atomic_write_text, provenance_references
 from zen.skills import get_available_skills
 
 
@@ -505,6 +505,7 @@ def build_coverage_document(
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "run_id": run_record.get("run_id"),
         "run_name": run_record.get("run_name"),
+        "provenance": provenance_references(run_record),
         "scope": {
             "targets": run_record.get("targets_info") or [],
             "scan_mode": run_record.get("scan_mode"),

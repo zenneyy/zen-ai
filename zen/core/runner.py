@@ -42,6 +42,7 @@ from zen.core.inputs import (
     make_model_settings,
 )
 from zen.core.paths import run_dir_for, runtime_state_dir
+from zen.core.provenance import record_run_provenance
 from zen.core.sessions import open_agent_session
 from zen.report.state import get_global_report_state
 from zen.runtime import session_manager
@@ -370,9 +371,10 @@ async def run_zen_scan(
             prompt_cache=settings.llm.prompt_cache,
             extra_headers=settings.llm.extra_headers,
         )
+        provider = ZenProvider()
         run_config = RunConfig(
             model=resolved_model,
-            model_provider=ZenProvider(),
+            model_provider=provider,
             model_settings=model_settings,
             sandbox=SandboxRunConfig(client=bundle["client"], session=bundle["session"]),
             trace_include_sensitive_data=False,
@@ -389,6 +391,24 @@ async def run_zen_scan(
         if interactive:
             coordinator.set_budget_extender(hooks.extend_budget)
 
+        # What produced this run, recorded before any agent starts; never fails the scan.
+        await record_run_provenance(
+            run_dir,
+            scan_id=scan_id,
+            resumed=is_resume,
+            image=image,
+            bundle=bundle,
+            provider=provider,
+            model=resolved_model,
+            settings=settings,
+            run_settings={
+                "model": resolved_model,
+                "scan_mode": scan_mode,
+                "max_turns": max_turns,
+                "max_budget_usd": max_budget_usd,
+                "interactive": interactive,
+            },
+        )
         scope_context = build_scope_context(scan_config)
         scan_targets = build_scan_targets(scan_config)
 
