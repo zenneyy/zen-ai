@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, NoReturn
 import pytest
 
 from zen.core import provenance
+from zen.runtime import docker_client
 from zen.tools.ledger.runtime import set_ledger
 
 
@@ -124,3 +125,49 @@ def _isolate_run_provenance(
         provenance, "DEFAULT_PACKAGE_DIR", tmp_path_factory.getbasetemp() / "no-checkout" / "zen"
     )
     monkeypatch.setattr(provenance, "DEFAULT_FETCH_HEALTH", _no_health_reply)
+
+
+class _NoDockerDaemon:
+    """Any part of a Docker client, with no daemon behind it: every request made through
+    it is refused, except the answers it was given."""
+
+    def __init__(self, **answers: object) -> None:
+        self._answers = answers
+
+    def __getattr__(self, name: str) -> object:
+        return self._answers.get(name, _NoDockerDaemon())
+
+    def __call__(self, *_args: object, **_kwargs: object) -> NoReturn:
+        raise ConnectionRefusedError("no Docker daemon is asked during tests")
+
+
+def _daemonless_docker_client(*_args: object, **_kwargs: object) -> _NoDockerDaemon:
+    """Stands in for the cut's and the sweep's clients: it lists no containers and refuses
+    every other request."""
+    return _NoDockerDaemon(
+        containers=_NoDockerDaemon(list=lambda **_filters: []), close=lambda: None
+    )
+
+
+@pytest.fixture
+def production_docker_clients() -> None:
+    """Requested by a test that must see the Docker clients a scan makes; the isolation
+    fixture below then leaves them alone."""
+
+
+@pytest.fixture(autouse=True)
+def _isolate_docker_clients(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the suite from reaching the Docker daemon.
+
+    Every sandbox start sweeps orphaned sandboxes, and every armed stop makes a client for
+    its cut; both make their Docker clients through these two factories. Every test gets
+    clients that list no containers and refuse every request, so no test can sweep or cut
+    a real sandbox; a test that stands in for them sets its own after this fixture, and a
+    test that requests ``production_docker_clients`` keeps the factories a scan uses.
+    """
+    if "production_docker_clients" in request.fixturenames:
+        return
+    monkeypatch.setattr(docker_client, "DEFAULT_CUT_CLIENT", _daemonless_docker_client)
+    monkeypatch.setattr(docker_client, "DEFAULT_SWEEP_CLIENT", _daemonless_docker_client)

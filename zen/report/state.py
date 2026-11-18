@@ -19,6 +19,7 @@ from zen.report.sarif import write_sarif
 from zen.report.writer import (
     provenance_references,
     read_run_record,
+    stop_records,
     write_executive_report,
     write_run_record,
     write_vulnerabilities,
@@ -746,6 +747,22 @@ class ReportState:
         self.run_record["provenance"] = [*provenance_references(self.run_record), reference]
         self.save_run_data()
 
+    def record_stop(self, record: dict[str, Any]) -> None:
+        """Record one start's stop in run.json, and persist it.
+
+        A start's stop may be noted while its cut runs and again once the cut is done, so a
+        record for the same start replaces the earlier one. A resumed run adds its own and
+        keeps every earlier stop, oldest first, as with provenance.
+        """
+        started = record.get("started_at")
+        stops = stop_records(self.run_record)
+        if any(stop.get("started_at") == started for stop in stops):
+            stops = [dict(record) if stop.get("started_at") == started else stop for stop in stops]
+        else:
+            stops = [*stops, dict(record)]
+        self.run_record["stops"] = stops
+        self.save_run_data()
+
     def set_scan_config(self, config: dict[str, Any]) -> None:
         self.scan_config = config
         self.run_record["status"] = "running"
@@ -852,6 +869,7 @@ class ReportState:
                 run_dir,
                 self.final_scan_result,
                 provenance=provenance_references(self.run_record),
+                stops=stop_records(self.run_record),
             )
 
         # An index is written for an empty list too once a report was

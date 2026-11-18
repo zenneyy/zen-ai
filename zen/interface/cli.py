@@ -5,6 +5,7 @@ import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 from rich.console import Console
@@ -17,6 +18,7 @@ from zen.config.settings import DEFAULT_MAX_TURNS
 from zen.core.runner import run_zen_scan
 from zen.report.state import ReportState, set_global_report_state
 from zen.runtime import session_manager
+from zen.runtime.stop import cut_sandbox_network_now, stop_acknowledgment
 
 from .utils import (
     build_live_stats_text,
@@ -46,6 +48,34 @@ def _resolve_sandbox_image() -> str:
             "zen_image is not configured. Set it in ~/.zen/cli-config.json.",
         )
     return image
+
+
+# The signals that stop a command-line scan. Each cuts the sandbox's network before the
+# run is recorded and the process exits.
+_STOP_SIGNALS: tuple[signal.Signals, ...] = tuple(
+    getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name)
+)
+
+
+def _stop_signal_handler(
+    scan_id: str, report_state: ReportState, console: Console
+) -> Callable[[int, Any], None]:
+    """The handler for a stop signal: cut the sandbox's network, then record the run as
+    interrupted and exit. A second signal while the cut runs neither repeats nor skips it."""
+
+    def handle(signum: int, _frame: Any) -> None:
+        record = cut_sandbox_network_now(scan_id, f"signal {signal.Signals(signum).name}")
+        with contextlib.suppress(Exception):
+            console.print(stop_acknowledgment(record))
+        report_state.cleanup(status="interrupted")
+        sys.exit(1)
+
+    return handle
+
+
+def _install_stop_handlers(handler: Callable[[int, Any], None]) -> None:
+    for signum in _STOP_SIGNALS:
+        signal.signal(signum, handler)
 
 
 async def run_cli(args: Any) -> None:  # noqa: PLR0915
@@ -163,15 +193,8 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     def cleanup_on_exit() -> None:
         report_state.cleanup()
 
-    def signal_handler(_signum: int, _frame: Any) -> None:
-        report_state.cleanup(status="interrupted")
-        sys.exit(1)
-
     atexit.register(cleanup_on_exit)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    if hasattr(signal, "SIGHUP"):
-        signal.signal(signal.SIGHUP, signal_handler)
+    _install_stop_handlers(_stop_signal_handler(args.run_name, report_state, console))
 
     set_global_report_state(report_state)
 

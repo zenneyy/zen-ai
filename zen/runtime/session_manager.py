@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import io
 import logging
 import os
@@ -16,15 +17,25 @@ from agents.sandbox.entries import BaseEntry, LocalDir
 from agents.sandbox.manifest import Environment, Manifest
 
 from zen.config import load_settings
-from zen.runtime.backends import backend_supports_bind_mounts, get_backend
+from zen.runtime.backends import (
+    backend_supports_bind_mounts,
+    get_backend,
+    network_cut_target,
+    sweep_orphans,
+)
 from zen.runtime.caido_bootstrap import bootstrap_caido
 from zen.runtime.caido_handle import CaidoBootstrapHandle
+from zen.runtime.owner import ORPHAN_SWEPT
+from zen.runtime.stop import scan_stop
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agents.sandbox.session import BaseSandboxSession
 
     from zen.runtime.status import StatusSink
+    from zen.runtime.stop import ScanStop
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +46,9 @@ _CONTAINER_CAIDO_PORT = 48080
 
 
 _SESSION_CACHE: dict[str, dict[str, Any]] = {}
+
+# Sandboxes whose network was cut, by scan: never handed out again, ended by cleanup().
+_RETIRED: dict[str, list[dict[str, Any]]] = {}
 
 # Manifest root inside the container; entry keys hang off this path.
 _WORKSPACE_ROOT = "/workspace"
@@ -278,13 +292,13 @@ async def create_or_reuse(
         if status_sink is not None:
             status_sink(phase)
 
-    cached = _SESSION_CACHE.get(scan_id)
+    cached = await _reuse_cached(scan_id)
     if cached is not None:
-        logger.info("Reusing existing sandbox session for scan %s", scan_id)
         return cached
 
     backend_name = load_settings().runtime.backend
     backend = get_backend(backend_name)
+    await _sweep_orphans_first(backend_name, report)
 
     if backend_supports_bind_mounts(backend_name):
         bind_mounts = build_bind_mounts(local_sources)
@@ -330,6 +344,7 @@ async def create_or_reuse(
         exposed_ports=(_CONTAINER_CAIDO_PORT,),
         bind_mounts=bind_mounts,
     )
+    stop = await _arm_or_discard(scan_id, client, session)
 
     if extra_file_archive is not None:
         report("Placing workspace files")
@@ -364,10 +379,99 @@ async def create_or_reuse(
         "client": client,
         "session": session,
         "caido_client": caido_client,
+        "stop": stop,
     }
+    _hold(scan_id, bundle)
+    return bundle
+
+
+async def _reuse_cached(scan_id: str) -> dict[str, Any] | None:
+    """The scan's cached sandbox, armed with this start's stop. A sandbox whose network
+    was cut is never handed out again; cleanup() still ends it."""
+    cached = _SESSION_CACHE.get(scan_id)
+    if cached is None:
+        return None
+    if _was_cut(cached):
+        _retire(scan_id)
+        return None
+    logger.info("Reusing existing sandbox session for scan %s", scan_id)
+    try:
+        cached["stop"] = await _arm_stop(scan_id, cached["client"], cached["session"])
+    except BaseException:
+        _retire(scan_id)
+        raise
+    return cached
+
+
+async def _arm_or_discard(scan_id: str, client: Any, session: Any) -> ScanStop:
+    """Arm the scan's stop with a sandbox that just started; one whose cut cannot be
+    armed is discarded before anything uses it."""
+    try:
+        stop = await _arm_stop(scan_id, client, session)
+    except BaseException:
+        await _discard_session(client, session)
+        raise
+    return stop
+
+
+def _hold(scan_id: str, bundle: dict[str, Any]) -> None:
+    """Cache a sandbox that is ready, unless its network was cut while it started."""
+    if _was_cut(bundle):
+        _RETIRED.setdefault(scan_id, []).append(bundle)
+        logger.warning("Sandbox of scan %s lost its network while starting; not cached", scan_id)
+        return
     _SESSION_CACHE[scan_id] = bundle
     logger.info("Sandbox session for scan %s ready and cached", scan_id)
-    return bundle
+
+
+async def _sweep_orphans_first(backend_name: str, report: Callable[[str], None]) -> None:
+    """Before a sandbox starts, cut and remove those a zen process that has exited left
+    running, and say so."""
+    orphans = await asyncio.to_thread(sweep_orphans, backend_name)
+    swept = sum(1 for orphan in orphans if orphan.get("result") == ORPHAN_SWEPT)
+    messages: list[str] = []
+    if swept:
+        messages.append(
+            f"Removed {swept} sandbox(es) left running by a zen process that has exited; "
+            "each lost its network before it was removed"
+        )
+    if swept < len(orphans):
+        messages.append(
+            f"{len(orphans) - swept} sandbox(es) left running by a zen process that has "
+            "exited were not cut and removed in full; the log names each"
+        )
+    for message in messages:
+        logger.warning("%s", message)
+        report(message)
+
+
+async def _arm_stop(scan_id: str, client: Any, session: Any) -> ScanStop:
+    """Arm the scan's stop with this sandbox, so a stop cuts its network.
+
+    A backend that offers no cut leaves the stop unarmed. One that offers a cut it cannot
+    arm raises, and the caller discards the sandbox: it never starts.
+    """
+    target = await asyncio.to_thread(network_cut_target, client, session)
+    stop = scan_stop(scan_id)
+    if target is None:
+        logger.warning(
+            "The sandbox backend of scan %s offers no network cut; a stop cannot cut it", scan_id
+        )
+        return stop
+    stop.arm(target, on_cut=functools.partial(_retire, scan_id))
+    return stop
+
+
+def _retire(scan_id: str) -> None:
+    """Take the scan's cached sandbox out of the cache once its network is being cut: it
+    is never handed out again, and cleanup() still ends it."""
+    bundle = _SESSION_CACHE.pop(scan_id, None)
+    if bundle is not None:
+        _RETIRED.setdefault(scan_id, []).append(bundle)
+
+
+def _was_cut(bundle: dict[str, Any]) -> bool:
+    return getattr(bundle.get("stop"), "cut_started", False) is True
 
 
 async def _discard_session(client: Any, session: Any) -> None:
@@ -379,18 +483,27 @@ async def _discard_session(client: Any, session: Any) -> None:
 
 
 async def cleanup(scan_id: str) -> None:
-    """Tear down ``scan_id``'s container and drop its cache entry.
+    """Tear down ``scan_id``'s containers and drop its cache entry: the cached one and
+    every one retired after its network was cut.
 
     Best-effort: any error during ``client.delete`` is logged and
     swallowed. We never want a cleanup failure to prevent the next
     scan from starting; the worst case is a stranded container that
     Docker's normal reaping will catch on next ``docker prune``.
     """
-    bundle = _SESSION_CACHE.pop(scan_id, None)
-    if bundle is None:
+    bundles = _RETIRED.pop(scan_id, [])
+    cached = _SESSION_CACHE.pop(scan_id, None)
+    if cached is not None:
+        bundles.append(cached)
+    if not bundles:
         logger.debug("cleanup(%s): no cached session", scan_id)
         return
+    for bundle in bundles:
+        await _teardown(scan_id, bundle)
 
+
+async def _teardown(scan_id: str, bundle: dict[str, Any]) -> None:
+    """End one sandbox: its proxy client, its container and its Docker client."""
     caido_client = bundle.get("caido_client")
     if caido_client is not None:
         try:

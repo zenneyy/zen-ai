@@ -26,8 +26,10 @@ import contextlib
 import logging
 import os
 import uuid
-from typing import Any, cast
+from collections.abc import Callable
+from typing import Any, Final, cast
 
+import docker  # type: ignore[import-untyped, unused-ignore]
 from agents.sandbox.errors import ExposedPortUnavailableError
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.sandboxes.docker import (
@@ -46,6 +48,9 @@ from docker.types import LogConfig  # type: ignore[import-untyped, unused-ignore
 from docker.types import Mount as DockerSDKMount  # type: ignore[import-untyped, unused-ignore]
 from docker.utils import parse_repository_tag  # type: ignore[import-untyped, unused-ignore]
 from requests.exceptions import RequestException
+
+from zen.runtime.owner import ORPHAN_SWEPT, OWNER_PID_LABEL, owner_gone, owner_labels
+from zen.runtime.stop import CUT_REQUEST_TIMEOUT_S, CutTarget
 
 
 logger = logging.getLogger(__name__)
@@ -121,6 +126,35 @@ def _apply_run_labels(create_kwargs: dict[str, Any]) -> None:
     run_type = os.getenv("ZEN_RUN_TYPE")
     if run_type:
         labels["zen-run-type"] = run_type
+
+
+def _apply_owner_labels(create_kwargs: dict[str, Any]) -> None:
+    """Name the zen process that owns this sandbox, so a later start can tell an orphan,
+    whose owner has exited, from a sandbox another scan still uses."""
+    labels = create_kwargs.setdefault("labels", {})
+    if isinstance(labels, dict):
+        labels.update(owner_labels())
+
+
+# The sweep before a start is not pressed for time: a slow removal is waited for, not
+# reported as failed.
+SWEEP_REQUEST_TIMEOUT_S: Final = 10.0
+
+
+def make_cut_client(api_version: str) -> Any:
+    """A Docker client of the cut's own. It speaks the API version the scan's client
+    already agreed with the daemon, so making it sends no request, and its short timeout
+    bounds only the cut's own requests."""
+    return docker.from_env(timeout=CUT_REQUEST_TIMEOUT_S, version=api_version)
+
+
+def make_sweep_client() -> Any:
+    """A Docker client of the sweep's own, with a timeout that suits a removal."""
+    return docker.from_env(timeout=SWEEP_REQUEST_TIMEOUT_S)
+
+
+DEFAULT_CUT_CLIENT: Callable[[str], Any] = make_cut_client
+DEFAULT_SWEEP_CLIENT: Callable[[], Any] = make_sweep_client
 
 
 class ZenDockerSandboxSession(DockerSandboxSession):
@@ -236,6 +270,7 @@ class ZenDockerSandboxClient(DockerSandboxClient):
         _apply_resource_limits(create_kwargs)
         _apply_log_limits(create_kwargs)
         _apply_run_labels(create_kwargs)
+        _apply_owner_labels(create_kwargs)
 
         # Zen injection: local source trees, sorted shallowest-first so a
         # nested spec lands on top of the tree it covers.
@@ -275,6 +310,21 @@ class ZenDockerSandboxClient(DockerSandboxClient):
             cast("ZenDockerSandboxSession", inner).sandbox_network = network
         return session
 
+    def network_cut_target(self, session: SandboxSession) -> CutTarget:
+        """What the scan's stop needs to cut this sandbox's network: the container, the
+        networks it is attached to now, and a Docker client of the cut's own."""
+        state = getattr(session._inner, "state", None)
+        container_id = getattr(state, "container_id", None)
+        if not container_id:
+            raise RuntimeError("the sandbox has no container id, so its network cannot be cut")
+        attrs = self.docker_client.containers.get(container_id).attrs or {}
+        networks = (attrs.get("NetworkSettings") or {}).get("Networks") or {}
+        return CutTarget(
+            client=DEFAULT_CUT_CLIENT(self.docker_client.api.api_version),
+            container_id=str(container_id),
+            networks=tuple(sorted(networks)),
+        )
+
     async def delete(self, session: SandboxSession) -> SandboxSession:
         container_id = getattr(getattr(session._inner, "state", None), "container_id", None)
         if container_id:
@@ -290,3 +340,61 @@ class ZenDockerSandboxClient(DockerSandboxClient):
             ):
                 self.docker_client.containers.get(container_id).kill()
         return await super().delete(session)
+
+
+def sweep_orphan_sandboxes(make_client: Callable[[], Any] | None = None) -> list[dict[str, str]]:
+    """Cut and remove every running sandbox whose owning zen process has exited.
+
+    Runs before a new sandbox starts. Only a sandbox whose labels name this machine and
+    this user, and whose owner is known to have exited, is touched; its networks are cut
+    before it is removed. Returns one entry per sandbox touched.
+    """
+    try:
+        client = (make_client or DEFAULT_SWEEP_CLIENT)()
+    except Exception:  # noqa: BLE001 - a failed sweep never blocks a scan
+        logger.warning("Could not look for orphaned sandboxes", exc_info=True)
+        return []
+    try:
+        containers = client.containers.list(filters={"label": OWNER_PID_LABEL, "status": "running"})
+    except Exception:  # noqa: BLE001 - a failed sweep never blocks a scan
+        logger.warning("Could not look for orphaned sandboxes", exc_info=True)
+        containers = []
+    swept = [
+        _remove_orphan(client, container)
+        for container in containers
+        if owner_gone(container.labels or {})
+    ]
+    with contextlib.suppress(Exception):
+        client.close()
+    return swept
+
+
+def _remove_orphan(client: Any, container: Any) -> dict[str, str]:
+    """Cut an orphaned sandbox's networks, then remove it."""
+    networks = ((container.attrs or {}).get("NetworkSettings") or {}).get("Networks") or {}
+    failed = [name for name in sorted(networks) if not _disconnected(client, container.id, name)]
+    try:
+        container.remove(force=True)
+    except Exception as exc:  # noqa: BLE001 - one orphan never stops the sweep
+        cut = f"not cut from {', '.join(failed)}" if failed else "cut"
+        result = f"{cut}; not removed ({type(exc).__name__})"
+    else:
+        result = (
+            f"removed (not disconnected first from {', '.join(failed)})" if failed else ORPHAN_SWEPT
+        )
+    owner_pid = str((container.labels or {}).get(OWNER_PID_LABEL, ""))
+    logger.warning(
+        "Orphaned sandbox %s of zen process %s, which has exited: %s",
+        container.short_id,
+        owner_pid,
+        result,
+    )
+    return {"container": str(container.short_id), "owner_pid": owner_pid, "result": result}
+
+
+def _disconnected(client: Any, container_id: str, network: str) -> bool:
+    try:
+        client.api.disconnect_container_from_network(container_id, network, force=True)
+    except Exception:  # noqa: BLE001 - the removal that follows ends the sandbox either way
+        return False
+    return True

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -37,6 +38,7 @@ from zen.interface.tui.sidecar import (
 )
 from zen.interface.utils import read_workspace_files
 from zen.report.state import ReportState, set_global_report_state
+from zen.runtime.stop import cut_sandbox_network, scan_stop
 from zen.telemetry import report_error, set_scan_phase
 from zen.utils.resource_paths import get_zen_resource_path
 
@@ -47,6 +49,10 @@ if TYPE_CHECKING:
     import subprocess
 
 logger = logging.getLogger(__name__)
+
+# Signals that stop a TUI scan: the sandbox network is cut before the scan is cancelled.
+# SIGINT already ends the session through asyncio, and its way out cuts first as well.
+_STOP_SIGNAL_NAMES = ("SIGTERM", "SIGHUP")
 
 
 def _revision_count(report: dict[str, Any]) -> int:
@@ -71,6 +77,8 @@ class GoTuiRuntime:
         self._error_noted_agents: set[str] = set()
         self.model_verified = False
         self._setup_preflight: asyncio.Task[None] | None = None
+        # Why the session is ending, once that is known: a signal, a failure or a quit.
+        self._stop_reason: str | None = None
         self.controller = TuiController(
             args,
             live_view=self.live_view,
@@ -380,7 +388,12 @@ class GoTuiRuntime:
                     self.controller.notify_changed()
             await asyncio.sleep(0.5)
 
-    async def quit(self) -> None:
+    async def quit(self, reason: str = "tui quit") -> None:
+        """End the session: cut the scan's sandbox network first, then cancel the scan."""
+        scan_id = self._scan_id()
+        if scan_id is not None:
+            with contextlib.suppress(Exception):
+                await cut_sandbox_network(scan_id, reason)
         self.controller.close_viewer()
         self.coordinator.mark_shutting_down()
         scan_task = self.scan_task
@@ -389,6 +402,59 @@ class GoTuiRuntime:
                 scan_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await scan_task
+
+    def _scan_id(self) -> str | None:
+        """The scan whose sandbox a stop cuts, once a scan has been started."""
+        if self.scan_task is None:
+            return None
+        run_name = self.scan_config.get("run_name")
+        return str(run_name) if run_name else None
+
+    def _install_stop_signals(
+        self, loop: asyncio.AbstractEventLoop, main_task: asyncio.Task[Any] | None
+    ) -> list[int]:
+        """Bind SIGTERM and SIGHUP to the stop while the TUI runs; returns those bound."""
+        if main_task is None:
+            return []
+        signums = [getattr(signal, name) for name in _STOP_SIGNAL_NAMES if hasattr(signal, name)]
+        return [signum for signum in signums if self._add_stop_signal(loop, signum, main_task)]
+
+    def _add_stop_signal(
+        self, loop: asyncio.AbstractEventLoop, signum: int, main_task: asyncio.Task[Any]
+    ) -> bool:
+        try:
+            loop.add_signal_handler(signum, self._on_stop_signal, signum, main_task)
+        except (NotImplementedError, RuntimeError, ValueError):
+            logger.debug("Signal %s cannot stop the TUI scan here", signum, exc_info=True)
+            return False
+        return True
+
+    def _on_stop_signal(self, signum: int, main_task: asyncio.Task[Any]) -> None:
+        """Receive the stop, which starts the cut at once, then end the session; on its way
+        out the session waits for the cut before it cancels the scan. A second signal
+        changes nothing."""
+        if self._stop_reason is not None:
+            return
+        reason = f"signal {signal.Signals(signum).name}"
+        self._stop_reason = reason
+        scan_id = self._scan_id()
+        if scan_id is not None:
+            scan_stop(scan_id).request(reason)
+        main_task.cancel()
+
+    @staticmethod
+    def _remove_stop_signals(signums: list[int]) -> None:
+        loop = asyncio.get_running_loop()
+        for signum in signums:
+            with contextlib.suppress(Exception):
+                loop.remove_signal_handler(signum)
+
+    async def _terminate(
+        self, process: asyncio.subprocess.Process | subprocess.Popen[bytes] | None, reason: str
+    ) -> None:
+        """End the TUI process, noting why the session ends unless a signal already did."""
+        self._stop_reason = self._stop_reason or reason
+        await terminate_process(process)
 
     @staticmethod
     def binary_command() -> list[str]:
@@ -427,6 +493,9 @@ class GoTuiRuntime:
         sync_task: asyncio.Task[None] | None = None
         prepare_task: asyncio.Task[None] | None = None
         process: asyncio.subprocess.Process | subprocess.Popen[bytes] | None = None
+        stop_signals = self._install_stop_signals(
+            asyncio.get_running_loop(), asyncio.current_task()
+        )
         try:
             env = child_environment()
             env["ZEN_VERSION"] = package_version()
@@ -447,21 +516,23 @@ class GoTuiRuntime:
             return_code = await wait_process(process)
             check_return_code(return_code)
         except Exception as exc:
-            await terminate_process(process)
+            await self._terminate(process, "tui failed")
             if not self.server.activated:
                 raise GoTuiPreActivationError(str(exc)) from exc
             raise
         except BaseException:
-            await terminate_process(process)
+            await self._terminate(process, "interrupted")
             raise
         finally:
             try:
                 if backend_socket is not None:
                     backend_socket.close()
                 await self._cancel_tasks(prepare_task, sync_task)
-                await self.quit()
+                await self.quit(self._stop_reason or "tui quit")
                 await self.server.close()
             finally:
+                # Kept until the cut is done, so a second signal cannot end the process first.
+                self._remove_stop_signals(stop_signals)
                 sys.stdout = original_stdout
                 sys.stderr = original_stderr
                 output_sink.close()

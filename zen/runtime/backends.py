@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 
 if TYPE_CHECKING:
     from agents.sandbox.manifest import Manifest
+
+    from zen.runtime.stop import CutTarget
 
 
 logger = logging.getLogger(__name__)
@@ -103,3 +105,25 @@ def backend_supports_bind_mounts(name: str) -> bool:
 
 def supported_backends() -> list[str]:
     return sorted(_BACKENDS)
+
+
+def sweep_orphans(name: str) -> list[dict[str, str]]:
+    """Cut and remove the sandboxes that a zen process which has exited left running.
+
+    Only the Docker backend labels its sandboxes with their owner; another backend has
+    nothing to sweep here.
+    """
+    if name != "docker":
+        return []
+    from zen.runtime.docker_client import sweep_orphan_sandboxes
+
+    return sweep_orphan_sandboxes()
+
+
+def network_cut_target(client: Any, session: Any) -> CutTarget | None:
+    """What a scan's stop needs to cut this sandbox's network, or None when the backend
+    offers no cut."""
+    make_target = getattr(client, "network_cut_target", None)
+    if make_target is None:
+        return None
+    return cast("CutTarget", make_target(session))

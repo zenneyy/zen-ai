@@ -46,6 +46,7 @@ from zen.core.provenance import record_run_provenance
 from zen.core.sessions import open_agent_session
 from zen.report.state import get_global_report_state
 from zen.runtime import session_manager
+from zen.runtime.stop import STOP_CONTEXT_KEY, begin_scan_stop, cut_sandbox_network
 from zen.telemetry import set_scan_phase
 from zen.telemetry.logging import set_scan_id, setup_scan_logging
 from zen.tools.output_store import (
@@ -325,6 +326,9 @@ async def run_zen_scan(
     else:
         root_id = uuid.uuid4().hex[:8]
 
+    # This start's stop, armed with the sandbox at bring-up: whatever ends the scan cuts
+    # the sandbox's network before any agent is cancelled.
+    stop = begin_scan_stop(scan_id)
     logger.info("Bringing up sandbox session for scan %s", scan_id)
     set_scan_phase("sandbox_init")
     bundle = await session_manager.create_or_reuse(
@@ -354,6 +358,7 @@ async def run_zen_scan(
 
     sessions_to_close: list[SQLiteSession] = []
     mcp_registry: McpRegistry | None = None
+    stop_reason = "scan ended"
 
     try:
         targets = scan_config.get("targets") or []
@@ -544,6 +549,8 @@ async def run_zen_scan(
             "spawn_child_agent": spawn_child_agent,
             "scan_targets": scan_targets,
             "max_context_images": settings.runtime.max_context_images,
+            # Every agent's tools answer with the stop notice once this stop is received.
+            STOP_CONTEXT_KEY: stop,
         }
 
         root_session = open_agent_session(root_id, agents_db)
@@ -628,6 +635,7 @@ async def run_zen_scan(
                 )
         return result  # noqa: TRY300
     except BudgetExceededError as exc:
+        stop_reason = "budget exceeded"
         logger.info("Scan %s stopped: %s", scan_id, exc)
         _note_exit_reason("budget_exceeded")
         if root_id is not None:
@@ -635,6 +643,7 @@ async def run_zen_scan(
                 await coordinator.set_status(root_id, "stopped")
         return None
     except RateLimitError as exc:
+        stop_reason = "rate limited"
         logger.warning(
             "Scan %s stopped: persistent rate limit from the LLM provider (%s). "
             "Resume with 'zen --resume %s' once the limit clears.",
@@ -648,18 +657,24 @@ async def run_zen_scan(
                 await coordinator.set_status(root_id, "stopped")
         return None
     except (asyncio.CancelledError, KeyboardInterrupt):
+        stop_reason = "interrupted"
         logger.info("Scan %s interrupted by the user", scan_id)
         if root_id is not None:
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "running")
         raise
     except BaseException:
+        stop_reason = "failed"
         logger.exception("Zen scan %s failed", scan_id)
         if root_id is not None:
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "failed")
         raise
     finally:
+        # Cut the sandbox's network before anything else, so no agent acts on the target
+        # while the scan winds down.
+        with contextlib.suppress(Exception):
+            await cut_sandbox_network(scan_id, stop_reason)
         configure_spill_writer(None)
         # Settle descendants before closing sessions: on a clean finish a child
         # can still be mid-turn, and closing its session underneath it crashes it.

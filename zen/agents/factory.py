@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from zen.agents.prompt import render_system_prompt
 from zen.config import load_settings
 from zen.llm.request_log import current_call_context
+from zen.runtime.stop import stop_notice
 from zen.tools.command_log.tools import record_command
 from zen.tools.agents_graph.tools import (
     agent_finish,
@@ -161,6 +162,29 @@ def _with_bounded_result(tool: FunctionTool) -> FunctionTool:
 
     tool.on_invoke_tool = invoke
     tool._zen_bounded = True  # type: ignore[attr-defined]
+    return tool
+
+
+def _with_stop_gate[T: (FunctionTool, CustomTool)](tool: T) -> T:
+    """Answer every call with the stop notice once the scan's stop is received (idempotent).
+
+    The check comes before the tool, so after a stop no tool an agent holds starts work.
+    """
+    if getattr(tool, "_zen_stop_gated", False):
+        return tool
+    invoke_tool = tool.on_invoke_tool
+
+    async def invoke(ctx: Any, raw_input: str) -> Any:
+        notice = stop_notice(getattr(ctx, "context", None))
+        if notice is not None:
+            return notice
+        result: Any = invoke_tool(ctx, raw_input)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    tool.on_invoke_tool = invoke
+    tool._zen_stop_gated = True  # type: ignore[attr-defined]
     return tool
 
 
@@ -352,31 +376,30 @@ def _bound_custom_tool(tool: CustomTool) -> CustomTool:
     return tool
 
 
+def _filesystem_tool(tool: Any, *, chat_completions: bool, strict_schemas: bool) -> Tool | None:
+    """A filesystem tool as an agent holds it, gated by the scan's stop; None for anything
+    that is not a tool."""
+    if isinstance(tool, CustomTool):
+        if chat_completions:
+            return _with_stop_gate(_custom_tool_as_function_tool(tool))
+        return _with_stop_gate(_bound_custom_tool(tool))
+    if isinstance(tool, FunctionTool):
+        prepared = _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+        if chat_completions:
+            return _with_stop_gate(_function_tool_with_error_result(prepared))
+        return _with_stop_gate(_with_bounded_result(prepared))
+    return None
+
+
 def _configure_filesystem_tools(
     toolset: Any, *, chat_completions: bool, strict_schemas: bool = True
 ) -> None:
     for name, tool in vars(toolset).items():
-        if chat_completions:
-            if isinstance(tool, CustomTool):
-                setattr(toolset, name, _custom_tool_as_function_tool(tool))
-            elif isinstance(tool, FunctionTool):
-                setattr(
-                    toolset,
-                    name,
-                    _function_tool_with_error_result(
-                        _with_strictness(_with_coerced_arguments(tool), strict_schemas)
-                    ),
-                )
-        elif isinstance(tool, CustomTool):
-            setattr(toolset, name, _bound_custom_tool(tool))
-        elif isinstance(tool, FunctionTool):
-            setattr(
-                toolset,
-                name,
-                _with_bounded_result(
-                    _with_strictness(_with_coerced_arguments(tool), strict_schemas)
-                ),
-            )
+        prepared = _filesystem_tool(
+            tool, chat_completions=chat_completions, strict_schemas=strict_schemas
+        )
+        if prepared is not None:
+            setattr(toolset, name, prepared)
 
 
 def _make_filesystem_configurator(*, chat_completions: bool, strict_schemas: bool) -> Any:
@@ -507,7 +530,7 @@ def _configure_shell_tools(
             wrapped = _wrap_write_stdin(wrapped)
         if chat_completions:
             wrapped = _function_tool_with_error_result(wrapped)
-        setattr(toolset, name, wrapped)
+        setattr(toolset, name, _with_stop_gate(wrapped))
 
 
 def _make_shell_configurator(*, chat_completions: bool, strict_schemas: bool) -> Any:
@@ -668,6 +691,17 @@ def registered_agent_tools() -> tuple[Tool, ...]:
     return tuple(_EXTRA_TOOLS)
 
 
+def _prepared_tool(tool: Tool, strict_schemas: bool) -> Tool:
+    """One of an agent's own tools as the model calls it: arguments coerced, result
+    bounded, and gated by the scan's stop."""
+    if isinstance(tool, FunctionTool):
+        coerced = _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+        return _with_stop_gate(_with_bounded_result(coerced))
+    if isinstance(tool, CustomTool):
+        return _with_stop_gate(tool)
+    return tool
+
+
 def build_zen_agent(
     *,
     name: str = "agent",
@@ -719,12 +753,7 @@ def build_zen_agent(
     else:
         tools = [*_BASE_TOOLS, *agent_tools, agent_finish]
     _ensure_unique_tool_names(tools)
-    tools = [
-        _with_bounded_result(_with_strictness(_with_coerced_arguments(tool), strict_tool_schemas))
-        if isinstance(tool, FunctionTool)
-        else tool
-        for tool in tools
-    ]
+    tools = [_prepared_tool(tool, strict_tool_schemas) for tool in tools]
 
     logger.info(
         "Built %s agent '%s' (skills=%d, tools=%d, scan_mode=%s, whitebox=%s)",

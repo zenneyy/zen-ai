@@ -143,12 +143,14 @@ def write_executive_report(
     final_scan_result: str,
     *,
     provenance: Sequence[Mapping[str, Any]] = (),
+    stops: Sequence[Mapping[str, Any]] = (),
 ) -> None:
     path = run_dir / "penetration_test_report.md"
     with path.open("w", encoding="utf-8") as f:
         f.write("# Security Penetration Test Report\n\n")
         f.write(f"**Generated:** {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n")
         f.writelines(f"{line}\n\n" for line in provenance_header_lines(provenance))
+        f.writelines(f"{line}\n\n" for line in stop_header_lines(stops))
         f.write(f"{final_scan_result}\n")
     logger.info("Saved final penetration test report to: %s", path)
 
@@ -183,6 +185,28 @@ def _provenance_line(reference: Mapping[str, Any]) -> str:
     return (
         f"**{label}:** {where}, started with local changes: "
         f"{modified} modified tracked file(s), {untracked} untracked code path(s)."
+    )
+
+
+def stop_records(run_record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The stops run.json records, one per start that received one, oldest first."""
+    stored = run_record.get("stops")
+    if not isinstance(stored, list):
+        return []
+    return [dict(stop) for stop in stored if isinstance(stop, dict)]
+
+
+def stop_header_lines(stops: Sequence[Mapping[str, Any]]) -> list[str]:
+    """One plain line per stop: why and when it came, and what became of the network."""
+    return [_stop_line(stop) for stop in stops]
+
+
+def _stop_line(stop: Mapping[str, Any]) -> str:
+    cut_at = stop.get("cut_at")
+    when = f" at {cut_at}" if cut_at else ""
+    return (
+        f"**Stopped:** {stop.get('reason')} at {stop.get('received_at')}; "
+        f"sandbox network {stop.get('cut_result') or 'not cut'}{when}."
     )
 
 
