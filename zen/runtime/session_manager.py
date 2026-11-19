@@ -11,7 +11,7 @@ import sys
 import tarfile
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from agents.sandbox.entries import BaseEntry, LocalDir
 from agents.sandbox.manifest import Environment, Manifest
@@ -49,6 +49,9 @@ _SESSION_CACHE: dict[str, dict[str, Any]] = {}
 
 # Sandboxes whose network was cut, by scan: never handed out again, ended by cleanup().
 _RETIRED: dict[str, list[dict[str, Any]]] = {}
+
+# Docker states in which a sandbox's processes can still run; every other state is stopped.
+_RUNNING_STATES: Final = frozenset({"running", "paused", "restarting"})
 
 # Manifest root inside the container; entry keys hang off this path.
 _WORKSPACE_ROOT = "/workspace"
@@ -426,23 +429,46 @@ def _hold(scan_id: str, bundle: dict[str, Any]) -> None:
 
 async def _sweep_orphans_first(backend_name: str, report: Callable[[str], None]) -> None:
     """Before a sandbox starts, cut and remove those a zen process that has exited left
-    running, and say so."""
+    behind, running or stopped, and say so."""
     orphans = await asyncio.to_thread(sweep_orphans, backend_name)
-    swept = sum(1 for orphan in orphans if orphan.get("result") == ORPHAN_SWEPT)
+    swept = [orphan for orphan in orphans if orphan.get("result") == ORPHAN_SWEPT]
     messages: list[str] = []
     if swept:
         messages.append(
-            f"Removed {swept} sandbox(es) left running by a zen process that has exited; "
-            "each lost its network before it was removed"
+            f"Removed {len(swept)} sandbox(es) left by a zen process that has exited "
+            f"({_states(swept)}); each lost its network before it was removed"
         )
-    if swept < len(orphans):
+    if len(swept) < len(orphans):
         messages.append(
-            f"{len(orphans) - swept} sandbox(es) left running by a zen process that has "
-            "exited were not cut and removed in full; the log names each"
+            f"{len(orphans) - len(swept)} sandbox(es) left by a zen process that has exited "
+            "were not cut and removed in full; the log names each"
         )
     for message in messages:
         logger.warning("%s", message)
         report(message)
+
+
+def exit_sweep_summary(removed: list[dict[str, str]]) -> str | None:
+    """The one line zen prints as it exits about the sandboxes it still had, or None when
+    it had none."""
+    if not removed:
+        return None
+    partial = [entry for entry in removed if entry.get("result") != ORPHAN_SWEPT]
+    if partial:
+        named = ", ".join(f"{entry['container']} ({entry['result']})" for entry in partial)
+        return (
+            f"{len(removed)} sandbox(es) of this zen process were still present at exit; "
+            f"not cut and removed in full: {named}"
+        )
+    return (
+        f"Removed {len(removed)} sandbox(es) of this zen process that were still present at "
+        f"exit ({_states(removed)}); each lost its network before it was removed"
+    )
+
+
+def _states(entries: list[dict[str, str]]) -> str:
+    running = sum(1 for entry in entries if entry.get("state") in _RUNNING_STATES)
+    return f"{running} running, {len(entries) - running} stopped"
 
 
 async def _arm_stop(scan_id: str, client: Any, session: Any) -> ScanStop:

@@ -18,7 +18,13 @@ from zen.config.settings import DEFAULT_MAX_TURNS
 from zen.core.runner import run_zen_scan
 from zen.report.state import ReportState, set_global_report_state
 from zen.runtime import session_manager
-from zen.runtime.stop import cut_sandbox_network_now, stop_acknowledgment
+from zen.runtime.stop import (
+    STOP_EXIT_STATUS,
+    STOP_UNDER_WAY,
+    cut_sandbox_network_now,
+    scan_stop,
+    stop_acknowledgment,
+)
 
 from .utils import (
     build_live_stats_text,
@@ -61,14 +67,21 @@ def _stop_signal_handler(
     scan_id: str, report_state: ReportState, console: Console
 ) -> Callable[[int, Any], None]:
     """The handler for a stop signal: cut the sandbox's network, then record the run as
-    interrupted and exit. A second signal while the cut runs neither repeats nor skips it."""
+    interrupted and exit. Once the scan's stop is under way, whether a signal or the scan's
+    own end began it, a further signal only says so: the first stop's path runs to the end.
+    So does a signal after the run has ended, which leaves the run record as last saved."""
 
     def handle(signum: int, _frame: Any) -> None:
+        stop = scan_stop(scan_id)
+        if stop.requested or stop.run_ended:
+            with contextlib.suppress(Exception):
+                console.print(STOP_UNDER_WAY, soft_wrap=True)
+            return
         record = cut_sandbox_network_now(scan_id, f"signal {signal.Signals(signum).name}")
         with contextlib.suppress(Exception):
             console.print(stop_acknowledgment(record))
         report_state.cleanup(status="interrupted")
-        sys.exit(1)
+        sys.exit(STOP_EXIT_STATUS)
 
     return handle
 

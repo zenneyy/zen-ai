@@ -51,8 +51,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Signals that stop a TUI scan: the sandbox network is cut before the scan is cancelled.
-# SIGINT already ends the session through asyncio, and its way out cuts first as well.
-_STOP_SIGNAL_NAMES = ("SIGTERM", "SIGHUP")
+_STOP_SIGNAL_NAMES = ("SIGINT", "SIGTERM", "SIGHUP")
 
 
 def _revision_count(report: dict[str, Any]) -> int:
@@ -62,6 +61,10 @@ def _revision_count(report: dict[str, Any]) -> int:
 
 class GoTuiPreActivationError(RuntimeError):
     """A sidecar failure raised before the Go TUI activates."""
+
+
+class TuiStoppedError(Exception):
+    """The TUI's run ended because the TUI received a stop signal."""
 
 
 class GoTuiRuntime:
@@ -79,6 +82,8 @@ class GoTuiRuntime:
         self._setup_preflight: asyncio.Task[None] | None = None
         # Why the session is ending, once that is known: a signal, a failure or a quit.
         self._stop_reason: str | None = None
+        # The stop signal that ended the session, if one did.
+        self._stop_signal: str | None = None
         self.controller = TuiController(
             args,
             live_view=self.live_view,
@@ -413,7 +418,7 @@ class GoTuiRuntime:
     def _install_stop_signals(
         self, loop: asyncio.AbstractEventLoop, main_task: asyncio.Task[Any] | None
     ) -> list[int]:
-        """Bind SIGTERM and SIGHUP to the stop while the TUI runs; returns those bound."""
+        """Bind SIGINT, SIGTERM and SIGHUP to the stop while the TUI runs; returns those bound."""
         if main_task is None:
             return []
         signums = [getattr(signal, name) for name in _STOP_SIGNAL_NAMES if hasattr(signal, name)]
@@ -437,6 +442,7 @@ class GoTuiRuntime:
             return
         reason = f"signal {signal.Signals(signum).name}"
         self._stop_reason = reason
+        self._stop_signal = reason
         scan_id = self._scan_id()
         if scan_id is not None:
             scan_stop(scan_id).request(reason)
@@ -543,4 +549,12 @@ class GoTuiRuntime:
 
 
 async def run_go_tui(args: argparse.Namespace) -> None:
-    await GoTuiRuntime(args).run()
+    """Run the TUI. A run that the TUI's own stop signal ended raises TuiStoppedError; any
+    other cancellation of the run stays one."""
+    runtime = GoTuiRuntime(args)
+    try:
+        await runtime.run()
+    except asyncio.CancelledError:
+        if runtime._stop_signal is None:
+            raise
+        raise TuiStoppedError(runtime._stop_signal) from None

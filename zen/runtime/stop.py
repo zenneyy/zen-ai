@@ -40,6 +40,13 @@ STOP_NOTICE: Final = (
     "Stop received: this scan is ending and its sandbox's network is cut, so this tool "
     "call did not run. Do not retry it."
 )
+# The exit status of a scan a stop signal ended, on the command line and in the TUI alike.
+STOP_EXIT_STATUS: Final = 1
+# What a further stop signal is told while the first stop's path runs to the end. It holds
+# whenever it can be printed, the cut still running included.
+STOP_UNDER_WAY: Final = (
+    "Stop already under way: zen exits once the cleanup is done; SIGKILL abandons the cleanup."
+)
 
 _CUT: Final = "cut"
 _GONE: Final = "cut (the sandbox was already gone)"
@@ -75,6 +82,7 @@ class ScanStop:
         self._target: CutTarget | None = None
         self._on_cut: Callable[[], None] | None = None
         self._thread: threading.Thread | None = None
+        self._run_ended = False
         # Reentrant: a signal handler can run on the main thread while it holds the lock.
         self._lock = threading.RLock()
 
@@ -82,6 +90,16 @@ class ScanStop:
     def requested(self) -> bool:
         """Whether the stop has been received."""
         return self.reason is not None
+
+    @property
+    def run_ended(self) -> bool:
+        """Whether the run has ended: its record has had its last save, which no stop that
+        comes later changes."""
+        return self._run_ended
+
+    def note_run_ended(self) -> None:
+        """Note that the run's record has had its last save."""
+        self._run_ended = True
 
     @property
     def cut_started(self) -> bool:

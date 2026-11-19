@@ -161,11 +161,13 @@ def _isolate_docker_clients(
 ) -> None:
     """Keep the suite from reaching the Docker daemon.
 
-    Every sandbox start sweeps orphaned sandboxes, and every armed stop makes a client for
-    its cut; both make their Docker clients through these two factories. Every test gets
-    clients that list no containers and refuse every request, so no test can sweep or cut
-    a real sandbox; a test that stands in for them sets its own after this fixture, and a
-    test that requests ``production_docker_clients`` keeps the factories a scan uses.
+    Every sandbox start sweeps orphaned sandboxes, every armed stop makes a client for its
+    cut, and a zen process that made a sandbox sweeps for any it still has as it exits; all
+    three make their Docker clients through these two factories, the exit sweep through
+    the sweep's. Every test gets clients that list no containers and refuse every request,
+    so no test can sweep or cut a real sandbox; a test that stands in for them sets its own
+    after this fixture, and a test that requests ``production_docker_clients`` keeps the
+    factories a scan uses.
     """
     if "production_docker_clients" in request.fixturenames:
         return

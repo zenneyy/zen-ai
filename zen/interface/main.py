@@ -6,7 +6,9 @@ Zen Agent Interface
 import argparse
 import asyncio
 import contextlib
+import signal
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from rich.console import Console
@@ -405,6 +407,62 @@ def _bootstrap_scan(args: argparse.Namespace) -> None:
     telemetry_start(args)
 
 
+def _run_tui(args: argparse.Namespace) -> bool:
+    """Run the TUI. True when a stop signal the TUI received ended its run; any other
+    cancellation of the run surfaces as one."""
+    from zen.interface.tui.runtime import TuiStoppedError
+
+    try:
+        asyncio.run(run_tui(args))
+    except TuiStoppedError:
+        return True
+    return False
+
+
+def _remove_own_sandboxes() -> None:
+    """Cut and remove any sandbox this process created that is still present once the
+    scan's event loop has closed: a stop during the sandbox's bring-up can leave one."""
+    try:
+        from zen.runtime.docker_client import remove_own_sandboxes
+        from zen.runtime.session_manager import exit_sweep_summary
+
+        line = exit_sweep_summary(remove_own_sandboxes())
+    except Exception:
+        logger.warning("Could not look for sandboxes this zen process still has", exc_info=True)
+        return
+    if line:
+        with contextlib.suppress(Exception):
+            Console().print(line, soft_wrap=True)
+
+
+# The signals that stop a scan. While main() finishes, each only says the stop is under way.
+_STOP_SIGNALS: tuple[signal.Signals, ...] = tuple(
+    getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, name)
+)
+
+
+@contextlib.contextmanager
+def _stop_signals_held() -> Iterator[None]:
+    """While main() finishes, a stop signal only prints that the stop is under way, whether
+    or not this process made a sandbox; the handlers from before come back afterwards."""
+    from zen.runtime.stop import STOP_UNDER_WAY
+
+    console = Console()
+
+    def under_way(_signum: int, _frame: object) -> None:
+        with contextlib.suppress(Exception):
+            console.print(STOP_UNDER_WAY, soft_wrap=True)
+
+    previous = {signum: signal.getsignal(signum) for signum in _STOP_SIGNALS}
+    for signum in previous:
+        signal.signal(signum, under_way)
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+
+
 def main() -> None:
     configure_dependency_logging()
 
@@ -447,6 +505,7 @@ def main() -> None:
         _bootstrap_scan(args)
 
     from zen.report.state import get_global_report_state
+    from zen.runtime.stop import STOP_EXIT_STATUS, scan_stop
 
     exit_reason = "user_exit"
     try:
@@ -457,8 +516,10 @@ def main() -> None:
             # Headless runs have no user to quit: the agent either finished
             # (already beaconed as finished_by_tool) or stopped on its own.
             exit_reason = "agent_stopped"
-        else:
-            asyncio.run(run_tui(args))
+        elif _run_tui(args):
+            # A stop signal ended the TUI's run: it leaves as the command line's stop does.
+            exit_reason = "interrupted"
+            sys.exit(STOP_EXIT_STATUS)
     except InteractiveSetupUnavailableError as exc:
         exit_reason = "error"
         report_error("interactive_setup_unavailable", exc)
@@ -466,20 +527,32 @@ def main() -> None:
         sys.exit(1)
     except KeyboardInterrupt:
         exit_reason = "interrupted"
+    except asyncio.CancelledError:
+        # A cancellation that no stop signal explains is a failure, not a stop.
+        exit_reason = "error"
+        raise
     except Exception as exc:
         exit_reason = "error"
         report_error("unhandled_exception", exc)
         raise
     finally:
-        report_state = get_global_report_state()
+        # The scan's event loop has closed, so nothing in this process is still creating or
+        # starting a sandbox: one it still has can be removed for good. Until the run record
+        # is last saved, a stop signal only says that the stop is under way.
+        with _stop_signals_held():
+            _remove_own_sandboxes()
+            report_state = get_global_report_state()
+            if report_state:
+                status = {"interrupted": "interrupted", "error": "failed"}.get(
+                    exit_reason,
+                    "stopped",
+                )
+                report_state.cleanup(status=status)
+                # The run has ended: a stop signal from here on leaves its record as saved.
+                scan_stop(report_state.run_name or report_state.run_id).note_run_ended()
         if report_state:
-            status = {"interrupted": "interrupted", "error": "failed"}.get(
-                exit_reason,
-                "stopped",
-            )
-            report_state.cleanup(status=status)
-            # Best-effort beacons on the way out. They reach the network, so a
-            # second Ctrl-C lands here; abandon them rather than trading a clean
+            # Best-effort beacons on the way out. They reach the network, so they run after
+            # the hold: a second Ctrl-C lands here; abandon them rather than trading a clean
             # exit for a traceback.
             with contextlib.suppress(KeyboardInterrupt, Exception):
                 posthog.end(report_state, exit_reason=exit_reason)

@@ -42,9 +42,13 @@ async def _docker_backend(
     import docker
     from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
 
-    from zen.runtime.docker_client import ZenDockerSandboxClient
+    from zen.runtime.docker_client import ZenDockerSandboxClient, docker_connection
 
-    client = ZenDockerSandboxClient(docker.from_env())
+    # One connection: the scan's client is made from it and keeps it, so that the cut a
+    # stop makes reaches the same daemon.
+    connection = docker_connection()
+    client = ZenDockerSandboxClient(docker.DockerClient(**connection))
+    client.zen_connection = connection
     client.zen_bind_mounts = bind_mounts or []
     options = DockerSandboxClientOptions(image=image, exposed_ports=exposed_ports)
     session = await client.create(options=options, manifest=manifest)
